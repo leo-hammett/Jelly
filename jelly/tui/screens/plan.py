@@ -10,6 +10,7 @@ from textual.widgets import Button, Footer, Header, Input, Static
 
 from jelly.agents.planner import Planner
 from jelly.config import Config
+from jelly.tui.splitter import PaneSplitter
 
 
 class PlanScreen(Screen):
@@ -40,6 +41,14 @@ class PlanScreen(Screen):
                     "[dim italic]Starting planner...[/dim italic]",
                     classes="system-message",
                 )
+            yield PaneSplitter(
+                orientation="horizontal",
+                before="#conversation-log",
+                after="#plan-input-area",
+                id="plan-splitter",
+                min_before=8,
+                min_after=8,
+            )
             with Vertical(id="plan-input-area"):
                 yield Input(
                     placeholder="Type your response and press Enter...",

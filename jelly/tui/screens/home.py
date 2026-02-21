@@ -8,6 +8,8 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Label, ListItem, ListView, ProgressBar, Static
 
+from jelly.tui.splitter import PaneSplitter
+
 
 class HomeScreen(Screen):
     """Dashboard: pick a requirements file, see its readiness score, launch actions."""
@@ -33,6 +35,14 @@ class HomeScreen(Screen):
                 with Vertical(id="file-panel"):
                     yield Static("Requirements Files", id="file-panel-title")
                     yield ListView(id="file-list")
+                yield PaneSplitter(
+                    orientation="vertical",
+                    before="#file-panel",
+                    after="#score-panel",
+                    id="home-splitter",
+                    min_before=24,
+                    min_after=32,
+                )
                 with Vertical(id="score-panel"):
                     yield Static("Readiness Score", id="score-title")
                     yield Static("--", id="score-value")

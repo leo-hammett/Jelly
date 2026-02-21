@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from rich.console import Console
 
@@ -9,6 +10,7 @@ from jelly.agents.programmer import Programmer
 from jelly.agents.test_designer import TestDesigner
 from jelly.agents.test_executor import TestExecutor
 from jelly.config import Config
+from jelly.run_logging import RunLogger
 from jelly.utils import extract_signatures, read_file, write_files
 
 console = Console()
@@ -76,16 +78,40 @@ def run_task(
         Final structured test results dict.
     """
     config = Config()
+    abs_requirements = str(Path(requirements_path).resolve())
+    abs_project_dir = str(Path(project_dir).resolve())
+    logger = RunLogger.create(
+        config.log_dir,
+        config.log_level,
+        requirements_path=abs_requirements,
+        project_dir=abs_project_dir,
+    )
+    logger.event(
+        "INFO",
+        "orchestrator",
+        "run.start",
+        max_fix_iterations=config.max_fix_iterations,
+    )
+
     requirements = read_file(requirements_path)
     signatures = extract_signatures(requirements)
 
     if on_progress is None:
         console.rule("[bold blue]Jelly — Multi-Agent Coding System")
+        console.print(f"[dim]Run log: {logger.log_file}[/dim]")
 
     # Step 1: Design tests
     _emit(on_progress, 1, "Designing tests from requirements...", "running", "")
-    test_designer = TestDesigner(config)
-    design = test_designer.design_tests(requirements, signatures)
+    logger.event(
+        "INFO",
+        "orchestrator",
+        "step.start",
+        step=1,
+        title="Design tests",
+    )
+    test_designer = TestDesigner(config, logger=logger)
+    with logger.timed("orchestrator", "design_tests"):
+        design = test_designer.design_tests(requirements, signatures, project_dir)
     test_files = design.unit_test_files
     mcp_plan = design.mcp_test_plan
     detail = f"Generated {len(test_files)} test file(s)"
@@ -95,37 +121,115 @@ def run_task(
             f"across {len(mcp_plan.servers)} server(s)"
         )
     _emit(on_progress, 1, "Designing tests from requirements...", "complete", detail)
+    logger.event(
+        "INFO",
+        "orchestrator",
+        "step.complete",
+        step=1,
+        title="Design tests",
+        test_files=len(test_files),
+        mcp_servers=len(mcp_plan.servers),
+        mcp_steps=len(mcp_plan.steps),
+    )
 
     # Step 2: Generate code
     _emit(on_progress, 2, "Generating code from requirements...", "running", "")
+    logger.event(
+        "INFO",
+        "orchestrator",
+        "step.start",
+        step=2,
+        title="Generate code",
+    )
     programmer = Programmer(config)
-    code_files = programmer.generate(requirements)
+    with logger.timed("orchestrator", "generate_code"):
+        code_files = programmer.generate(requirements)
     _emit(
         on_progress, 2, "Generating code from requirements...", "complete",
         f"Generated {len(code_files)} source file(s)",
     )
+    logger.event(
+        "INFO",
+        "orchestrator",
+        "step.complete",
+        step=2,
+        title="Generate code",
+        code_files=len(code_files),
+    )
 
     # Step 3: Adapt tests
     _emit(on_progress, 3, "Adapting tests to match generated code...", "running", "")
-    test_files = test_designer.adapt_tests(code_files, test_files)
+    logger.event(
+        "INFO",
+        "orchestrator",
+        "step.start",
+        step=3,
+        title="Adapt tests",
+    )
+    with logger.timed("orchestrator", "adapt_tests"):
+        test_files = test_designer.adapt_tests(code_files, test_files)
     _emit(
         on_progress, 3, "Adapting tests to match generated code...", "complete",
         f"Adapted {len(test_files)} test file(s)",
     )
+    logger.event(
+        "INFO",
+        "orchestrator",
+        "step.complete",
+        step=3,
+        title="Adapt tests",
+        test_files=len(test_files),
+    )
 
     # Step 4: Test and iterate
     _emit(on_progress, 4, "Testing and iterating...", "running", "")
-    executor = TestExecutor(config)
+    logger.event(
+        "INFO",
+        "orchestrator",
+        "step.start",
+        step=4,
+        title="Test & iterate",
+    )
+    executor = TestExecutor(config, logger=logger)
     results: dict = {}
 
     for i in range(1, config.max_fix_iterations + 1):
+        logger.event(
+            "INFO",
+            "orchestrator",
+            "iteration.start",
+            iteration=i,
+            code_files=len(code_files),
+            test_files=len(test_files),
+            mcp_steps=len(mcp_plan.steps) if mcp_plan else 0,
+        )
         results = executor.run_all(code_files, test_files, mcp_plan, project_dir)
+        logger.event(
+            "INFO",
+            "orchestrator",
+            "iteration.results",
+            iteration=i,
+            all_passed=results.get("all_passed"),
+            total_tests=results.get("total_tests"),
+            passed=results.get("passed"),
+            failed=results.get("failed"),
+        )
 
         if results["all_passed"]:
             _emit(
                 on_progress, 4, "Testing and iterating...", "complete",
                 f"All {results['total_tests']} tests passed (iteration {i})",
                 iteration=i,
+            )
+            logger.event(
+                "INFO",
+                "orchestrator",
+                "step.complete",
+                step=4,
+                title="Test & iterate",
+                iteration=i,
+                total_tests=results["total_tests"],
+                failed=results["failed"],
             )
             break
 
@@ -134,25 +238,85 @@ def run_task(
 
         if i < config.max_fix_iterations:
             feedback = executor.format_feedback(results)
+            logger.event(
+                "INFO",
+                "orchestrator",
+                "refine.start",
+                iteration=i,
+                feedback_length=len(feedback),
+            )
             code_files = programmer.refine(requirements, code_files, feedback, i)
             test_files = test_designer.adapt_tests(code_files, test_files)
+            logger.event(
+                "INFO",
+                "orchestrator",
+                "refine.complete",
+                iteration=i,
+                code_files=len(code_files),
+                test_files=len(test_files),
+            )
         else:
             _emit(
                 on_progress, 4, "Testing and iterating...", "failed",
                 f"Max iterations reached — {results['failed']} test(s) still failing",
                 iteration=i,
             )
+            logger.event(
+                "WARNING",
+                "orchestrator",
+                "step.failed",
+                step=4,
+                title="Test & iterate",
+                iteration=i,
+                failed=results["failed"],
+                total_tests=results["total_tests"],
+            )
 
     # Step 5: Write outputs
     _emit(on_progress, 5, f"Writing output to {project_dir}...", "running", "")
-    write_files(f"{project_dir}/src", code_files)
-    write_files(f"{project_dir}/tests", test_files)
+    logger.event(
+        "INFO",
+        "orchestrator",
+        "step.start",
+        step=5,
+        title="Write output",
+        clean_before_write=config.clean_output_before_write,
+    )
+    with logger.timed("orchestrator", "write_outputs"):
+        write_files(
+            f"{project_dir}/src",
+            code_files,
+            clean=config.clean_output_before_write,
+        )
+        write_files(
+            f"{project_dir}/tests",
+            test_files,
+            clean=config.clean_output_before_write,
+        )
     _emit(
         on_progress, 5, f"Writing output to {project_dir}...", "complete",
         f"Wrote {len(code_files)} source + {len(test_files)} test file(s)",
+    )
+    logger.event(
+        "INFO",
+        "orchestrator",
+        "step.complete",
+        step=5,
+        title="Write output",
+        code_files=len(code_files),
+        test_files=len(test_files),
     )
 
     if on_progress is None:
         console.rule("[bold blue]Complete")
 
+    logger.event(
+        "INFO",
+        "orchestrator",
+        "run.complete",
+        all_passed=results.get("all_passed", False),
+        total_tests=results.get("total_tests", 0),
+        failed=results.get("failed", 0),
+    )
+    results["run_log_file"] = str(logger.log_file)
     return results

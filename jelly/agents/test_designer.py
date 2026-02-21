@@ -1,11 +1,13 @@
 import json
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from jelly.agents.base import BaseAgent
 from jelly.config import Config
 from jelly.mcp import MCPServer, MCPTestPlan, MCPTestStep, install_server
+from jelly.run_logging import RunLogger
 
 TEST_DESIGNER_SYSTEM_PROMPT = """\
 You are a Test Designer. You write comprehensive tests from a requirements spec. \
@@ -53,10 +55,15 @@ class TestDesignResult:
 class TestDesigner:
     """Generates tests from requirements ONLY. Never sees generated code."""
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, logger: RunLogger | None = None) -> None:
         """Initialize with config. Creates internal BaseAgent with test designer prompt."""
         self.config = config
         self.agent = BaseAgent(TEST_DESIGNER_SYSTEM_PROMPT, config)
+        self.logger = logger
+
+    def _log(self, level: str, operation: str, **fields: Any) -> None:
+        if self.logger:
+            self.logger.event(level, "test_designer", operation, **fields)
 
     def generate_tests(
         self, requirements: str, function_signatures: list[str]
@@ -80,6 +87,12 @@ class TestDesigner:
             Dict mapping {filename: test_file_content}.
         """
         sigs_block = "\n".join(function_signatures)
+        self._log(
+            "INFO",
+            "generate_tests.start",
+            signature_count=len(function_signatures),
+            requirements_length=len(requirements),
+        )
         prompt = (
             f"## Requirements\n\n{requirements}\n\n"
             f"## Function Signatures to Test\n\n```\n{sigs_block}\n```\n\n"
@@ -92,8 +105,14 @@ class TestDesigner:
         test_files = self._parse_test_response(response)
 
         if not test_files:
+            self._log("WARNING", "generate_tests.parse_empty")
             test_files = self._fallback_from_requirements(requirements)
 
+        self._log(
+            "INFO",
+            "generate_tests.complete",
+            generated_files=len(test_files),
+        )
         return test_files
 
     _FENCE_RE = re.compile(r"```(\w*[^\n]*)\n(.*?)```", re.DOTALL)
@@ -108,35 +127,73 @@ class TestDesigner:
         2. The fence opening line (e.g. ``python:tests/test_parser.py``)
         """
         test_files: dict[str, str] = {}
+        fallback_counter = 0
 
         for fence_meta, block in self._FENCE_RE.findall(response):
             lines = block.strip().splitlines()
-            filename = None
+            raw_filename = None
 
             for line in lines[:3]:
                 match = self._TEST_FILENAME_COMMENT_RE.match(line.strip())
                 if match:
-                    filename = match.group(1)
+                    raw_filename = match.group(1)
                     break
 
-            if filename is None:
+            if raw_filename is None:
                 fence_match = self._TEST_FENCE_FILENAME_RE.search(fence_meta)
                 if fence_match:
-                    filename = fence_match.group(1)
+                    raw_filename = fence_match.group(1)
 
-            if filename is None:
-                filename = f"tests/test_generated_{len(test_files)}.py"
+            if raw_filename is None:
+                fallback_counter += 1
+                raw_filename = f"test_generated_{fallback_counter}.py"
+                self._log(
+                    "WARNING",
+                    "generate_tests.fallback_filename",
+                    fallback_index=fallback_counter,
+                )
 
-            if not filename.startswith("tests/"):
-                filename = f"tests/{filename}"
+            filename = self._normalize_test_filename(raw_filename, fallback_counter)
 
             content_lines = [
                 l for l in lines
                 if not re.match(r"^#\s*(?:tests/)?\S+\.\w+\s*$", l.strip())
             ]
-            test_files[filename] = "\n".join(content_lines).strip() + "\n"
+            content = "\n".join(content_lines).strip()
+            if not content:
+                self._log(
+                    "WARNING",
+                    "generate_tests.empty_file_dropped",
+                    filename=filename,
+                )
+                continue
+            test_files[filename] = content + "\n"
 
+        self._log(
+            "INFO",
+            "generate_tests.parsed_response",
+            parsed_files=len(test_files),
+        )
         return test_files
+
+    @staticmethod
+    def _normalize_test_filename(raw: str, fallback_counter: int) -> str:
+        candidate = raw.strip().replace("\\", "/")
+        candidate = re.sub(r"^(\./)+", "", candidate)
+        if candidate.startswith("tests/"):
+            candidate = candidate[len("tests/"):]
+        candidate = candidate.lstrip("/")
+
+        parts = [p for p in Path(candidate).parts if p not in ("", ".", "..")]
+        if not parts:
+            parts = [f"test_generated_{fallback_counter}.py"]
+
+        path = Path(*parts)
+        if not path.suffix:
+            path = path.with_suffix(".py")
+        if not path.name.startswith("test_"):
+            path = path.with_name(f"test_{path.name}")
+        return str(path)
 
     @staticmethod
     def _fallback_from_requirements(requirements: str) -> dict[str, str]:
@@ -145,7 +202,7 @@ class TestDesigner:
         test_blocks = [b for b in blocks if "test" in b.lower() and "assert" in b.lower()]
         if test_blocks:
             content = "\n\n".join(test_blocks)
-            return {"tests/test_fallback.py": content + "\n"}
+            return {"test_fallback.py": content + "\n"}
         return {}
 
     # ------------------------------------------------------------------
@@ -153,18 +210,36 @@ class TestDesigner:
     # ------------------------------------------------------------------
 
     def design_tests(
-        self, requirements: str, function_signatures: list[str]
+        self,
+        requirements: str,
+        function_signatures: list[str],
+        project_dir: str,
     ) -> TestDesignResult:
         """Full pipeline: analyze reqs, pick tools, install them, generate tests.
 
         Returns a TestDesignResult containing unit test files, an MCP test
         plan, and the list of servers that were installed.
         """
+        self._log(
+            "INFO",
+            "design_tests.start",
+            requirements_length=len(requirements),
+            signature_count=len(function_signatures),
+            project_dir=str(Path(project_dir).resolve()),
+        )
         analysis = self._analyze_requirements(requirements)
-        servers = self._select_tools(analysis)
+        servers = self._select_tools(analysis, project_dir)
         installed = self._install_tools(servers)
         unit_tests, mcp_plan = self._generate_test_plan(
             requirements, function_signatures, installed
+        )
+        self._log(
+            "INFO",
+            "design_tests.complete",
+            unit_test_files=len(unit_tests),
+            selected_servers=len(servers),
+            installed_servers=len(installed),
+            mcp_steps=len(mcp_plan.steps),
         )
         return TestDesignResult(
             unit_test_files=unit_tests,
@@ -237,12 +312,19 @@ class TestDesigner:
         adapted = self._parse_test_response(response)
 
         if not adapted:
+            self._log("WARNING", "adapt_tests.no_adapted_output")
             return test_files
 
         for fname, content in test_files.items():
             if fname not in adapted:
                 adapted[fname] = content
 
+        self._log(
+            "INFO",
+            "adapt_tests.complete",
+            original_files=len(test_files),
+            adapted_files=len(adapted),
+        )
         return adapted
 
     def _analyze_requirements(self, requirements: str) -> dict:
@@ -276,6 +358,7 @@ class TestDesigner:
         response = agent.call(prompt, 4096)
         result = self._parse_json_response(response)
         if result is None:
+            self._log("WARNING", "analyze_requirements.parse_failed")
             return {
                 "product_type": "other",
                 "user_concerns": [],
@@ -283,7 +366,7 @@ class TestDesigner:
             }
         return result
 
-    def _select_tools(self, analysis: dict) -> list[MCPServer]:
+    def _select_tools(self, analysis: dict, project_dir: str) -> list[MCPServer]:
         """Ask the LLM which MCP servers to install based on the analysis.
 
         The LLM gets a short cheat-sheet of well-known MCP servers in the
@@ -297,6 +380,10 @@ class TestDesigner:
         if not needs_beyond_unit:
             return []
 
+        filesystem_workspace = str(
+            (Path(project_dir) / ".mcp" / "filesystem").resolve()
+        )
+
         agent = BaseAgent(
             "You pick MCP servers for testing. "
             "Respond ONLY with a JSON array inside a code block.",
@@ -306,10 +393,10 @@ class TestDesigner:
             f"## Testing needs\n\n{json.dumps(needs_beyond_unit, indent=2)}\n\n"
             "## Well-known MCP servers (prefer these)\n\n"
             "1. **playwright** - Browser automation, E2E testing, UI verification\n"
-            '   command: "npx", args: ["@playwright/mcp@latest"]\n'
+            '   command: "npx", args: ["-y", "@playwright/mcp@latest"]\n'
             "   install_cmd: null (npx downloads on the fly)\n\n"
             "2. **filesystem** - Read/write/search files, verify output files\n"
-            '   command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/jelly_test"]\n'
+            f'   command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "{filesystem_workspace}"]\n'
             "   install_cmd: null\n\n"
             "You may also suggest other MCP servers you know about.\n"
             "If none of the testing needs require an MCP server, return [].\n\n"
@@ -328,25 +415,76 @@ class TestDesigner:
         response = agent.call(prompt, 4096)
         raw = self._parse_json_response(response)
         if not isinstance(raw, list):
+            self._log("WARNING", "select_tools.parse_failed")
             return []
 
-        servers = []
+        servers: list[MCPServer] = []
         for entry in raw:
             if not isinstance(entry, dict) or "name" not in entry:
                 continue
-            servers.append(MCPServer(
-                name=entry["name"],
-                command=entry.get("command", "npx"),
-                args=entry.get("args", []),
-                install_cmd=entry.get("install_cmd"),
-            ))
+            normalized = self._normalize_server_entry(entry, filesystem_workspace)
+            if normalized:
+                servers.append(normalized)
+        self._log(
+            "INFO",
+            "select_tools.complete",
+            selected_servers=[s.name for s in servers],
+        )
         return servers
+
+    def _normalize_server_entry(
+        self,
+        entry: dict[str, Any],
+        filesystem_workspace: str,
+    ) -> MCPServer | None:
+        name = str(entry.get("name", "")).strip()
+        command = str(entry.get("command", "npx")).strip()
+        if not name or not command:
+            return None
+
+        raw_args = entry.get("args", [])
+        if isinstance(raw_args, list):
+            args = [str(a) for a in raw_args if a is not None]
+        elif isinstance(raw_args, str):
+            args = [raw_args]
+        else:
+            args = []
+
+        if command == "npx" and "-y" not in args and "--yes" not in args:
+            args.insert(0, "-y")
+
+        if name.lower() == "filesystem":
+            flags = [a for a in args if a.startswith("-")]
+            package = next(
+                (a for a in args if "server-filesystem" in a),
+                "@modelcontextprotocol/server-filesystem",
+            )
+            args = [*flags, package, filesystem_workspace]
+
+        install_cmd = entry.get("install_cmd")
+        if install_cmd is not None and not isinstance(install_cmd, (str, list)):
+            install_cmd = None
+
+        return MCPServer(
+            name=name,
+            command=command,
+            args=args,
+            install_cmd=install_cmd,
+        )
 
     def _install_tools(self, servers: list[MCPServer]) -> list[MCPServer]:
         """Install each MCP server. Returns only the ones that succeeded."""
         installed = []
         for server in servers:
-            if install_server(server):
+            ok = install_server(server, logger=self.logger)
+            self._log(
+                "INFO" if ok else "WARNING",
+                "install_tools.result",
+                server=server.name,
+                install_cmd=server.install_cmd,
+                installed=ok,
+            )
+            if ok:
                 installed.append(server)
         return installed
 
@@ -406,7 +544,27 @@ class TestDesigner:
                     expected=entry.get("expected", ""),
                 ))
 
-        plan = MCPTestPlan(servers=servers, steps=steps)
+        valid_names = {s.name for s in servers}
+        filtered_steps: list[MCPTestStep] = []
+        for step in steps:
+            if step.server in valid_names:
+                filtered_steps.append(step)
+            else:
+                self._log(
+                    "WARNING",
+                    "generate_test_plan.invalid_server_step",
+                    description=step.description,
+                    server=step.server,
+                    available_servers=sorted(valid_names),
+                )
+
+        plan = MCPTestPlan(servers=servers, steps=filtered_steps)
+        self._log(
+            "INFO",
+            "generate_test_plan.complete",
+            unit_tests=len(unit_tests),
+            mcp_steps=len(filtered_steps),
+        )
         return unit_tests, plan
 
     @staticmethod

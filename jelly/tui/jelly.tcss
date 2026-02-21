@@ -4,6 +4,26 @@ Screen {
     background: $surface;
 }
 
+.pane-splitter {
+    background: $panel;
+}
+
+.pane-splitter-vertical {
+    width: 1;
+    min-width: 1;
+    height: 100%;
+}
+
+.pane-splitter-horizontal {
+    height: 1;
+    min-height: 1;
+    width: 100%;
+}
+
+.pane-splitter.dragging {
+    background: $accent;
+}
+
 /* ── Home Screen ───────────────────────────────────────────── */
 
 #home-container {
@@ -39,10 +59,10 @@ Screen {
 
 #score-panel {
     width: 40;
+    min-width: 32;
     height: 100%;
     border: solid $primary;
     padding: 1 2;
-    margin-left: 1;
 }
 
 #score-title {
@@ -142,9 +162,8 @@ Screen {
 }
 
 #plan-input-area {
-    dock: bottom;
-    height: auto;
-    max-height: 8;
+    height: 8;
+    min-height: 8;
     padding: 1 2;
     background: $panel;
 }
@@ -169,9 +188,13 @@ Screen {
     padding: 1 0;
 }
 
+#exec-main {
+    height: 1fr;
+}
+
 #steps-panel {
-    height: auto;
-    max-height: 16;
+    height: 12;
+    min-height: 6;
     border: solid $primary;
     padding: 1 2;
 }
@@ -197,11 +220,18 @@ Screen {
     text-align: right;
 }
 
+#exec-log-panel {
+    height: 1fr;
+}
+
+#exec-log-title {
+    padding: 1 0 0 0;
+}
+
 #exec-log {
     height: 1fr;
     border: solid $primary;
     padding: 1 2;
-    margin-top: 1;
     overflow-y: auto;
 }
 

@@ -7,6 +7,7 @@ from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Static
 
 from jelly.orchestrator import ProgressEvent, run_task
+from jelly.tui.splitter import PaneSplitter
 
 STEP_LABELS = {
     1: "Design tests",
@@ -64,17 +65,27 @@ class ExecuteScreen(Screen):
         yield Header(show_clock=True)
         with Vertical(id="exec-container"):
             yield Static("[b]EXECUTION[/b]", id="exec-title")
-            with Vertical(id="steps-panel"):
-                for i in range(1, 6):
-                    sw = StepWidget(i)
-                    self._steps[i] = sw
-                    yield sw
-            yield Static("[b]Log[/b]", id="exec-log-title")
-            with VerticalScroll(id="exec-log"):
-                yield Static(
-                    f"[dim]Running pipeline on {self._req_path}...[/dim]",
-                    classes="system-message",
+            with Vertical(id="exec-main"):
+                with Vertical(id="steps-panel"):
+                    for i in range(1, 6):
+                        sw = StepWidget(i)
+                        self._steps[i] = sw
+                        yield sw
+                yield PaneSplitter(
+                    orientation="horizontal",
+                    before="#steps-panel",
+                    after="#exec-log-panel",
+                    id="exec-splitter",
+                    min_before=6,
+                    min_after=8,
                 )
+                with Vertical(id="exec-log-panel"):
+                    yield Static("[b]Log[/b]", id="exec-log-title")
+                    with VerticalScroll(id="exec-log"):
+                        yield Static(
+                            f"[dim]Running pipeline on {self._req_path}...[/dim]",
+                            classes="system-message",
+                        )
             with Horizontal(id="exec-footer"):
                 yield Button("Back [Esc]", id="btn-back", variant="error")
         yield Footer()

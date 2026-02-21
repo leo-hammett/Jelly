@@ -17,16 +17,33 @@ def read_file(path: str) -> str:
     return Path(path).read_text()
 
 
-def write_files(directory: str, files: dict[str, str]) -> None:
+def write_files(directory: str, files: dict[str, str], clean: bool = False) -> None:
     """Write a dict of files to a directory, creating parent dirs as needed.
 
     Args:
         directory: Base directory to write into.
         files: Mapping of {filename: content} to write.
+        clean: If True, delete existing files under directory first.
     """
     base = Path(directory)
+    if clean and base.exists():
+        # Keep output deterministic by removing stale generated files.
+        for existing in sorted(base.rglob("*"), reverse=True):
+            if existing.is_file() or existing.is_symlink():
+                existing.unlink()
+            elif existing.is_dir():
+                try:
+                    existing.rmdir()
+                except OSError:
+                    pass
+
+    base.mkdir(parents=True, exist_ok=True)
     for filename, content in files.items():
-        dest = base / filename
+        normalized = filename.lstrip("/\\").replace("\\", "/")
+        root_prefix = f"{base.name}/"
+        if normalized.startswith(root_prefix):
+            normalized = normalized[len(root_prefix):]
+        dest = base / normalized
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(content)
 

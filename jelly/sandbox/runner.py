@@ -1,7 +1,10 @@
 import re
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
+
+from jelly.run_logging import RunLogger
 
 CONFTEST_CONTENT = """\
 import sys, os
@@ -13,6 +16,8 @@ def run_tests(
     code_files: dict[str, str],
     test_files: dict[str, str],
     timeout: int,
+    logger: RunLogger | None = None,
+    keep_sandbox_on_failure: bool = False,
 ) -> dict:
     """Execute pytest in an isolated subprocess.
 
@@ -37,8 +42,17 @@ def run_tests(
             failure_details: list[dict] each with
                 test_name, error_type, error_message, traceback
     """
+    _log(
+        logger,
+        "INFO",
+        "run.start",
+        code_files=len(code_files),
+        test_files=len(test_files),
+        timeout_seconds=timeout,
+    )
     tmp_dir = tempfile.mkdtemp(prefix="jelly_")
     tmp_path = Path(tmp_dir)
+    result_payload: dict | None = None
 
     try:
         src_dir = tmp_path / "src"
@@ -50,19 +64,22 @@ def run_tests(
         (src_dir / "__init__.py").write_text("")
         (tests_dir / "__init__.py").write_text("")
 
-        for filename, content in code_files.items():
-            dest = src_dir / Path(filename).name
+        for idx, (filename, content) in enumerate(code_files.items()):
+            rel_path = _safe_relative_path(filename, "src", f"generated_src_{idx}.py")
+            dest = src_dir / rel_path
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(content)
 
-        for filename, content in test_files.items():
-            dest = tests_dir / Path(filename).name
+        for idx, (filename, content) in enumerate(test_files.items()):
+            rel_path = _safe_relative_path(filename, "tests", f"test_generated_{idx}.py")
+            dest = tests_dir / rel_path
             dest.parent.mkdir(parents=True, exist_ok=True)
+            _ensure_package_dirs(dest.parent, tests_dir)
             dest.write_text(content)
 
         try:
             result = subprocess.run(
-                ["python", "-m", "pytest", "tests/", "-v", "--tb=short", "-q"],
+                [sys.executable, "-m", "pytest", "tests/", "-v", "--tb=short", "-q"],
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -70,8 +87,17 @@ def run_tests(
             )
             stdout = result.stdout
             stderr = result.stderr
+            _log(
+                logger,
+                "INFO",
+                "run.pytest_completed",
+                returncode=result.returncode,
+                stdout_length=len(stdout),
+                stderr_length=len(stderr),
+                tmp_dir=tmp_dir,
+            )
         except subprocess.TimeoutExpired:
-            return {
+            result_payload = {
                 "all_passed": False,
                 "total_tests": 0,
                 "passed": 0,
@@ -85,36 +111,100 @@ def run_tests(
                     }
                 ],
             }
+            _log(
+                logger,
+                "ERROR",
+                "run.timeout",
+                timeout_seconds=timeout,
+                tmp_dir=tmp_dir,
+            )
+            return result_payload
 
-        return _parse_pytest_output(stdout, stderr)
+        result_payload = _parse_pytest_output(stdout, stderr)
+        if result.returncode != 0:
+            if result_payload["failed"] == 0:
+                result_payload["failed"] = 1
+                result_payload["total_tests"] = max(
+                    result_payload["total_tests"],
+                    result_payload["passed"] + result_payload["failed"],
+                )
+                result_payload["failure_details"].append({
+                    "test_name": "(pytest execution)",
+                    "error_type": "ExecutionError",
+                    "error_message": (
+                        f"pytest exited with code {result.returncode}"
+                    ),
+                    "traceback": (stdout + "\n" + stderr).strip()[-1000:],
+                })
+            result_payload["all_passed"] = False
+
+        _log(
+            logger,
+            "INFO",
+            "run.complete",
+            all_passed=result_payload["all_passed"],
+            total_tests=result_payload["total_tests"],
+            failed=result_payload["failed"],
+            tmp_dir=tmp_dir,
+        )
+        return result_payload
 
     finally:
         import shutil
 
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        should_keep = (
+            keep_sandbox_on_failure
+            and result_payload is not None
+            and not result_payload.get("all_passed", False)
+        )
+        if should_keep:
+            _log(
+                logger,
+                "WARNING",
+                "run.keep_sandbox_on_failure",
+                tmp_dir=tmp_dir,
+            )
+        else:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _safe_relative_path(filename: str, root_prefix: str, fallback: str) -> Path:
+    raw = filename.replace("\\", "/")
+    parts = [p for p in Path(raw).parts if p not in ("", ".", "..", "/", "\\")]
+    if parts and parts[0] == root_prefix:
+        parts = parts[1:]
+    if not parts:
+        parts = [fallback]
+    return Path(*parts)
+
+
+def _log(
+    logger: RunLogger | None,
+    level: str,
+    operation: str,
+    **fields,
+) -> None:
+    if logger:
+        logger.event(level, "sandbox_runner", operation, **fields)
+
+
+def _ensure_package_dirs(path: Path, root: Path) -> None:
+    current = path
+    while True:
+        init_file = current / "__init__.py"
+        if not init_file.exists():
+            init_file.write_text("")
+        if current == root:
+            break
+        current = current.parent
 
 
 def _parse_pytest_output(stdout: str, stderr: str) -> dict:
     """Parse pytest -v --tb=short -q output into a structured dict."""
     failure_details: list[dict] = []
-    passed = 0
-    failed = 0
-    errors = 0
-
-    summary_match = re.search(
-        r"(\d+) passed(?:.*?(\d+) failed)?(?:.*?(\d+) error)?", stdout
-    )
-    if summary_match:
-        passed = int(summary_match.group(1))
-        failed = int(summary_match.group(2) or 0)
-        errors = int(summary_match.group(3) or 0)
-    else:
-        failed_only = re.search(r"(\d+) failed", stdout)
-        error_only = re.search(r"(\d+) error", stdout)
-        if failed_only:
-            failed = int(failed_only.group(1))
-        if error_only:
-            errors = int(error_only.group(1))
+    passed = _summary_count(stdout, "passed")
+    failed = _summary_count(stdout, "failed")
+    errors = _summary_count(stdout, "error")
 
     failed += errors
 
@@ -171,3 +261,8 @@ def _parse_pytest_output(stdout: str, stderr: str) -> dict:
         "failed": failed,
         "failure_details": failure_details,
     }
+
+
+def _summary_count(output: str, token: str) -> int:
+    match = re.search(rf"(\d+)\s+{token}s?\b", output)
+    return int(match.group(1)) if match else 0

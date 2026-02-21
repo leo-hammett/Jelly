@@ -11,3 +11,7 @@ class Config:
     use_extended_thinking: bool = True
     thinking_budget_tokens: int = 10000
     mcp_test_timeout: int = 60
+    log_level: str = "INFO"
+    log_dir: str = ".jelly_logs"
+    keep_sandbox_on_failure: bool = False
+    clean_output_before_write: bool = True
