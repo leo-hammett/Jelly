@@ -4,12 +4,12 @@ from jelly.agents.base import BaseAgent
 from jelly.config import Config
 
 PROGRAMMER_SYSTEM_PROMPT = """\
-You are an expert Python programmer. You generate production-quality code from requirements.
+You are an expert programmer. You generate production-quality code from requirements.
 
 For initial generation:
 1. Parse requirements carefully. Identify inputs, outputs, constraints, edge cases.
 2. Choose appropriate data structures and algorithms.
-3. Write clean Python with type hints, docstrings, and error handling.
+3. Write clean, idiomatic code following the language's best practices and conventions.
 4. Mentally trace through basic and edge case inputs before submitting.
 
 For refinement (fixing test failures):
@@ -17,12 +17,36 @@ For refinement (fixing test failures):
 2. Fix ONLY what's broken. Don't refactor working code.
 3. Trace the fix against the failing test to confirm it resolves the issue.
 
-Output each file in a separate ```python fence with a # filename.py comment at the top.
+## File output format
 
-Rules:
-- Type hints on all function signatures
-- Docstrings on public functions
-- Handle edge cases explicitly (empty inputs, None, boundaries)
+CRITICAL: Each file must be in its own fenced code block. The VERY FIRST LINE \
+inside the code fence MUST be a comment with the filename:
+
+```python
+# src/csv_parser.py
+import csv
+...
+```
+
+The `# src/<filename>` line is MANDATORY — without it the file cannot be saved \
+correctly.
+
+## File organization
+
+- Group related functionality into a SMALL number of well-named files. \
+Do NOT create one file per requirement — consolidate logically.
+- Use descriptive filenames (e.g. `parser.py`, `stats.py`, `report.py`), \
+NEVER generic names like `module_0.py` or `utils.py` for core logic.
+- Source files are placed flat in a `src/` directory. Use simple top-level \
+imports between them (e.g. `from parser import parse_csv`), NOT relative \
+imports (`from .parser import ...`) and NOT package imports \
+(`from mypackage import ...`).
+
+## Other rules
+
+- Use the language's type system where available
+- Document public interfaces
+- Handle edge cases explicitly (empty inputs, null/None, boundaries)
 - Standard library preferred; minimize dependencies
 - If requirements are ambiguous, make a reasonable assumption and comment it\
 """
@@ -46,14 +70,22 @@ class Programmer:
 
         Returns:
             Dict mapping {filename: code_content}.
-            Each file comes from a separate ```python fence with a
-            '# src/filename.py' comment at the top.
+            Each file comes from a separate fenced code block with a
+            '# src/filename' comment at the top.
         """
         prompt = (
             f"## Requirements\n\n{requirements}\n\n"
-            "Implement all the functions specified above. "
-            "Output each file in a separate ```python fence with a "
-            "`# src/<filename>.py` comment on the very first line of each fence."
+            "Implement all the functions specified above. Group related "
+            "functionality into a small number of well-named files — do NOT "
+            "create one file per requirement.\n\n"
+            "Output each file in a separate fenced code block. The VERY FIRST "
+            "LINE inside each code fence MUST be a `# src/<filename>` comment, "
+            "for example:\n\n"
+            "```python\n"
+            "# src/parser.py\n"
+            "import csv\n"
+            "...\n"
+            "```"
         )
         response = self.agent.call(prompt, self.config.programmer_max_tokens)
         return self._parse_code_response(response)
@@ -79,7 +111,7 @@ class Programmer:
             Updated {filename: code_content} with fixes applied.
         """
         code_section = "\n\n".join(
-            f"### {fname}\n```python\n{content}\n```"
+            f"### {fname}\n```\n{content}\n```"
             for fname, content in previous_code.items()
         )
 
@@ -88,8 +120,9 @@ class Programmer:
             f"## Current Code (iteration {iteration})\n\n{code_section}\n\n"
             f"## Test Failures\n\n{error_feedback}\n\n"
             "Fix ONLY what's broken. Don't refactor working code. "
-            "Output ALL files (including unchanged ones) in separate ```python fences "
-            "with `# src/<filename>.py` on the first line of each fence."
+            "Output ALL files (including unchanged ones) in separate fenced code "
+            "blocks. The VERY FIRST LINE inside each code fence MUST be "
+            "`# src/<filename>` (e.g. `# src/parser.py`)."
         )
         response = self.agent.call(prompt, self.config.programmer_max_tokens)
         result = self._parse_code_response(response)
@@ -103,7 +136,7 @@ class Programmer:
     def _parse_code_response(self, response: str) -> dict[str, str]:
         """Extract filename-to-code mapping from fenced code blocks.
 
-        Looks for ```python blocks with a '# filename.py' comment on the
+        Looks for fenced code blocks with a '# filename' comment on the
         first line. If no fences found, retries the API call once with an
         explicit reminder to use code fences.
 
@@ -117,36 +150,52 @@ class Programmer:
 
         if not result:
             retry_response = self.agent.call(
-                "Your previous response didn't contain any ```python code fences. "
+                "Your previous response didn't contain any fenced code blocks. "
                 "Please output the code again, with each file in a separate "
-                "```python fence and a `# src/<filename>.py` comment on the first line.",
+                "fenced code block and a `# src/<filename>` comment on the first line.",
                 self.config.programmer_max_tokens,
             )
             result = self._extract_files_from_response(retry_response)
 
         return result
 
-    @staticmethod
-    def _extract_files_from_response(response: str) -> dict[str, str]:
-        """Parse fenced code blocks with filename comments into a dict."""
-        blocks = BaseAgent.extract_code_blocks(response)
+    _FENCE_RE = re.compile(
+        r"```(\w*[^\n]*)\n(.*?)```", re.DOTALL
+    )
+    _FILENAME_COMMENT_RE = re.compile(r"^#\s*(?:src/)?([\w./-]+\.\w+)")
+    _FENCE_FILENAME_RE = re.compile(r"[\w]*:?\s*(?:src/)?([\w./-]+\.\w+)")
+
+    @classmethod
+    def _extract_files_from_response(cls, response: str) -> dict[str, str]:
+        """Parse fenced code blocks with filename comments into a dict.
+
+        Checks for filenames in two places:
+        1. The fence opening line (e.g. ``python:src/parser.py``)
+        2. The first 3 lines of content (e.g. ``# src/parser.py``)
+        """
         files: dict[str, str] = {}
 
-        for block in blocks:
+        for fence_meta, block in cls._FENCE_RE.findall(response):
             lines = block.strip().splitlines()
             filename = None
+
             for line in lines[:3]:
-                match = re.match(r"^#\s*(?:src/)?([\w./]+\.py)", line.strip())
+                match = cls._FILENAME_COMMENT_RE.match(line.strip())
                 if match:
                     filename = match.group(1)
                     break
+
+            if filename is None:
+                fence_match = cls._FENCE_FILENAME_RE.search(fence_meta)
+                if fence_match:
+                    filename = fence_match.group(1)
 
             if filename is None:
                 filename = f"module_{len(files)}.py"
 
             content_lines = [
                 l for l in lines
-                if not re.match(r"^#\s*(?:src/)?[\w./]+\.py\s*$", l.strip())
+                if not re.match(r"^#\s*(?:src/)?[\w./-]+\.\w+\s*$", l.strip())
             ]
             files[filename] = "\n".join(content_lines).strip() + "\n"
 

@@ -81,12 +81,14 @@ class BaseAgent:
 
     @staticmethod
     def extract_code_blocks(response: str) -> list[str]:
-        """Extract content from ```python ... ``` fences in a response.
+        """Extract content from fenced code blocks in a response.
+
+        Matches code fences with any language tag (or none).
 
         Args:
             response: Raw text response from Claude.
 
         Returns:
-            List of code strings found inside python fences.
+            List of code strings found inside fenced code blocks.
         """
-        return re.findall(r"```python\s*\n(.*?)```", response, re.DOTALL)
+        return re.findall(r"```\w*\s*\n(.*?)```", response, re.DOTALL)
