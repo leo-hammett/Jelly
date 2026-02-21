@@ -15,3 +15,13 @@ class Config:
     log_dir: str = ".jelly_logs"
     keep_sandbox_on_failure: bool = False
     clean_output_before_write: bool = True
+    # Step 2 rollout guard. Keep disabled by default for teammate safety.
+    enable_step2_pregnancy: bool = False
+    capability_threshold: float = 0.7
+    capability_checker_max_tokens: int = 4096
+    # Recursion controls for child builders.
+    pregnancy_max_depth: int = 3
+    pregnancy_timeout_seconds: int = 600
+    pregnancy_workspace_dir: str = ".jelly_children"
+    # MCP baseline is diagnostic-first (recommended, not hard-required).
+    require_mcp_baseline: bool = False

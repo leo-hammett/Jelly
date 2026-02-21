@@ -6,10 +6,12 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Static
 
+from jelly.config import Config
 from jelly.orchestrator import ProgressEvent, run_task
 from jelly.tui.splitter import PaneSplitter
 
 STEP_LABELS = {
+    0: "Capability gate",
     1: "Design tests",
     2: "Generate code",
     3: "Adapt tests",
@@ -58,6 +60,7 @@ class ExecuteScreen(Screen):
         super().__init__()
         self._req_path = requirements_path
         self._project_dir = project_dir
+        self._show_step0 = Config().enable_step2_pregnancy
         self._steps: dict[int, StepWidget] = {}
         self._finished = False
 
@@ -67,7 +70,8 @@ class ExecuteScreen(Screen):
             yield Static("[b]EXECUTION[/b]", id="exec-title")
             with Vertical(id="exec-main"):
                 with Vertical(id="steps-panel"):
-                    for i in range(1, 6):
+                    start_step = 0 if self._show_step0 else 1
+                    for i in range(start_step, 6):
                         sw = StepWidget(i)
                         self._steps[i] = sw
                         yield sw

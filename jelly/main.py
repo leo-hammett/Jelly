@@ -1,4 +1,5 @@
 import sys
+import json
 
 import click
 from rich.console import Console
@@ -26,13 +27,35 @@ def cli(ctx: click.Context) -> None:
     type=click.Path(),
     help="Output directory for generated code and tests.",
 )
-def run(requirements_path: str, project_dir: str) -> None:
+@click.option(
+    "--pregnancy-depth",
+    default=0,
+    type=int,
+    hidden=True,
+)
+@click.option(
+    "--pregnancy-signatures",
+    default="[]",
+    type=str,
+    hidden=True,
+)
+def run(
+    requirements_path: str,
+    project_dir: str,
+    pregnancy_depth: int,
+    pregnancy_signatures: str,
+) -> None:
     """Generate code from a requirements document, test it, and iterate.
 
     REQUIREMENTS_PATH is the path to a markdown requirements file.
     """
     try:
-        results = run_task(requirements_path, project_dir)
+        results = run_task(
+            requirements_path,
+            project_dir,
+            pregnancy_depth=pregnancy_depth,
+            pregnancy_signatures=_parse_signatures(pregnancy_signatures),
+        )
         if not results.get("all_passed"):
             sys.exit(1)
     except FileNotFoundError as e:
@@ -96,6 +119,16 @@ def score(requirements_path: str) -> None:
     except Exception as e:
         console.print(f"[bold red]Error:[/] {e}")
         sys.exit(1)
+
+
+def _parse_signatures(raw: str) -> list[str]:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed]
 
 
 if __name__ == "__main__":

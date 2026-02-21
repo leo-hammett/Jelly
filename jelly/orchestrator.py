@@ -9,7 +9,9 @@ from rich.console import Console
 from jelly.agents.programmer import Programmer
 from jelly.agents.test_designer import TestDesigner
 from jelly.agents.test_executor import TestExecutor
+from jelly.capability import assess_capability
 from jelly.config import Config
+from jelly.pregnancy import delegate_to_child_builder
 from jelly.run_logging import RunLogger
 from jelly.utils import extract_signatures, read_file, write_files
 
@@ -38,9 +40,9 @@ def _emit(
     status: str,
     detail: str,
     iteration: int = 0,
+    total_steps: int = 5,
 ) -> None:
-    total = 5
-    event = ProgressEvent(step, total, title, status, detail, iteration)
+    event = ProgressEvent(step, total_steps, title, status, detail, iteration)
 
     if callback is not None:
         callback(event)
@@ -58,9 +60,12 @@ def run_task(
     requirements_path: str,
     project_dir: str,
     on_progress: ProgressCallback = None,
+    pregnancy_depth: int | None = None,
+    pregnancy_signatures: list[str] | None = None,
 ) -> dict:
     """Run the full generate-test-fix loop.
 
+    Step 0 (optional): capability gate + child delegation.
     1. Read requirements and extract function signatures.
     2. Generate tests ONCE (from requirements only — Test Designer never sees code).
     3. Generate code from requirements.
@@ -78,6 +83,9 @@ def run_task(
         Final structured test results dict.
     """
     config = Config()
+    depth = max(0, pregnancy_depth or 0)
+    seen_signatures = list(pregnancy_signatures or [])
+    total_steps = 6 if config.enable_step2_pregnancy else 5
     abs_requirements = str(Path(requirements_path).resolve())
     abs_project_dir = str(Path(project_dir).resolve())
     logger = RunLogger.create(
@@ -91,6 +99,10 @@ def run_task(
         "orchestrator",
         "run.start",
         max_fix_iterations=config.max_fix_iterations,
+        enable_step2_pregnancy=config.enable_step2_pregnancy,
+        pregnancy_depth=depth,
+        pregnancy_signature_count=len(seen_signatures),
+        pregnancy_max_depth=config.pregnancy_max_depth,
     )
 
     requirements = read_file(requirements_path)
@@ -100,8 +112,86 @@ def run_task(
         console.rule("[bold blue]Jelly — Multi-Agent Coding System")
         console.print(f"[dim]Run log: {logger.log_file}[/dim]")
 
+    if config.enable_step2_pregnancy:
+        _emit(
+            on_progress,
+            0,
+            "Checking build capability...",
+            "running",
+            "",
+            total_steps=total_steps,
+        )
+        decision = assess_capability(
+            requirements=requirements,
+            requirements_path=requirements_path,
+            project_dir=project_dir,
+            config=config,
+            depth=depth,
+            logger=logger,
+        )
+        logger.event(
+            "INFO",
+            "orchestrator",
+            "capability.decision",
+            capable=decision.capable,
+            confidence=decision.confidence,
+            missing_capabilities=decision.missing_capabilities,
+            depth=depth,
+        )
+        if not decision.capable:
+            child_results = delegate_to_child_builder(
+                requirements_path=requirements_path,
+                project_dir=project_dir,
+                capability_decision=decision,
+                config=config,
+                depth=depth,
+                seen_signatures=seen_signatures,
+                logger=logger,
+            )
+            child_results["capability_decision"] = decision.to_dict()
+            if child_results.get("all_passed"):
+                _emit(
+                    on_progress,
+                    0,
+                    "Checking build capability...",
+                    "complete",
+                    "Delegated to child builder successfully.",
+                    total_steps=total_steps,
+                )
+            else:
+                _emit(
+                    on_progress,
+                    0,
+                    "Checking build capability...",
+                    "failed",
+                    "Delegation to child builder failed.",
+                    total_steps=total_steps,
+                )
+            logger.event(
+                "INFO",
+                "orchestrator",
+                "run.complete",
+                all_passed=child_results.get("all_passed", False),
+                total_tests=child_results.get("total_tests", 0),
+                failed=child_results.get("failed", 0),
+                delegated_to_child=child_results.get("delegated_to_child", False),
+            )
+            child_results["run_log_file"] = str(logger.log_file)
+            return child_results
+        _emit(
+            on_progress,
+            0,
+            "Checking build capability...",
+            "complete",
+            f"Capability check passed (confidence {decision.confidence:.2f}).",
+            total_steps=total_steps,
+        )
+
     # Step 1: Design tests
-    _emit(on_progress, 1, "Designing tests from requirements...", "running", "")
+    _emit(
+        on_progress, 1, "Designing tests from requirements...", "running", "",
+        total_steps=total_steps,
+    )
     logger.event(
         "INFO",
         "orchestrator",
@@ -120,7 +210,10 @@ def run_task(
             f", MCP plan: {len(mcp_plan.steps)} step(s) "
             f"across {len(mcp_plan.servers)} server(s)"
         )
-    _emit(on_progress, 1, "Designing tests from requirements...", "complete", detail)
+    _emit(
+        on_progress, 1, "Designing tests from requirements...", "complete", detail,
+        total_steps=total_steps,
+    )
     logger.event(
         "INFO",
         "orchestrator",
@@ -133,7 +226,10 @@ def run_task(
     )
 
     # Step 2: Generate code
-    _emit(on_progress, 2, "Generating code from requirements...", "running", "")
+    _emit(
+        on_progress, 2, "Generating code from requirements...", "running", "",
+        total_steps=total_steps,
+    )
     logger.event(
         "INFO",
         "orchestrator",
@@ -147,6 +243,7 @@ def run_task(
     _emit(
         on_progress, 2, "Generating code from requirements...", "complete",
         f"Generated {len(code_files)} source file(s)",
+        total_steps=total_steps,
     )
     logger.event(
         "INFO",
@@ -158,7 +255,10 @@ def run_task(
     )
 
     # Step 3: Adapt tests
-    _emit(on_progress, 3, "Adapting tests to match generated code...", "running", "")
+    _emit(
+        on_progress, 3, "Adapting tests to match generated code...", "running", "",
+        total_steps=total_steps,
+    )
     logger.event(
         "INFO",
         "orchestrator",
@@ -171,6 +271,7 @@ def run_task(
     _emit(
         on_progress, 3, "Adapting tests to match generated code...", "complete",
         f"Adapted {len(test_files)} test file(s)",
+        total_steps=total_steps,
     )
     logger.event(
         "INFO",
@@ -182,7 +283,10 @@ def run_task(
     )
 
     # Step 4: Test and iterate
-    _emit(on_progress, 4, "Testing and iterating...", "running", "")
+    _emit(
+        on_progress, 4, "Testing and iterating...", "running", "",
+        total_steps=total_steps,
+    )
     logger.event(
         "INFO",
         "orchestrator",
@@ -220,6 +324,7 @@ def run_task(
                 on_progress, 4, "Testing and iterating...", "complete",
                 f"All {results['total_tests']} tests passed (iteration {i})",
                 iteration=i,
+                total_steps=total_steps,
             )
             logger.event(
                 "INFO",
@@ -234,7 +339,10 @@ def run_task(
             break
 
         msg = f"Iteration {i}: {results['failed']}/{results['total_tests']} failed"
-        _emit(on_progress, 4, "Testing and iterating...", "running", msg, iteration=i)
+        _emit(
+            on_progress, 4, "Testing and iterating...", "running", msg, iteration=i,
+            total_steps=total_steps,
+        )
 
         if i < config.max_fix_iterations:
             feedback = executor.format_feedback(results)
@@ -260,6 +368,7 @@ def run_task(
                 on_progress, 4, "Testing and iterating...", "failed",
                 f"Max iterations reached — {results['failed']} test(s) still failing",
                 iteration=i,
+                total_steps=total_steps,
             )
             logger.event(
                 "WARNING",
@@ -273,7 +382,10 @@ def run_task(
             )
 
     # Step 5: Write outputs
-    _emit(on_progress, 5, f"Writing output to {project_dir}...", "running", "")
+    _emit(
+        on_progress, 5, f"Writing output to {project_dir}...", "running", "",
+        total_steps=total_steps,
+    )
     logger.event(
         "INFO",
         "orchestrator",
@@ -296,6 +408,7 @@ def run_task(
     _emit(
         on_progress, 5, f"Writing output to {project_dir}...", "complete",
         f"Wrote {len(code_files)} source + {len(test_files)} test file(s)",
+        total_steps=total_steps,
     )
     logger.event(
         "INFO",
