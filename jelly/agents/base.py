@@ -41,27 +41,36 @@ class BaseAgent:
 
         for attempt in range(3):
             try:
+                if self.config.use_extended_thinking:
+                    budget = self.config.thinking_budget_tokens
+                    effective_max = max(max_tokens, budget + 1024)
+                else:
+                    effective_max = max_tokens
+                    budget = 0
+
                 kwargs: dict = {
                     "model": self.config.model,
-                    "max_tokens": max_tokens,
+                    "max_tokens": effective_max,
                     "system": self.system_prompt,
                     "messages": [{"role": "user", "content": user_message}],
                 }
 
-                if self.config.use_extended_thinking:
+                if budget:
                     kwargs["temperature"] = 1
                     kwargs["thinking"] = {
                         "type": "enabled",
-                        "budget_tokens": self.config.thinking_budget_tokens,
+                        "budget_tokens": budget,
                     }
 
-                response = self.client.messages.create(**kwargs)
+                # Stream to avoid 10-minute timeout on long requests
+                text_parts: list[str] = []
+                with self.client.messages.stream(**kwargs) as stream:
+                    for event in stream:
+                        if event.type == "content_block_delta":
+                            if event.delta.type == "text_delta":
+                                text_parts.append(event.delta.text)
 
-                for block in response.content:
-                    if block.type == "text":
-                        return block.text
-
-                return ""
+                return "".join(text_parts)
 
             except anthropic.APIError:
                 if attempt == 2:
