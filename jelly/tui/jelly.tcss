@@ -1,0 +1,253 @@
+/* ── Global ─────────────────────────────────────────────────── */
+
+Screen {
+    background: $surface;
+}
+
+/* ── Home Screen ───────────────────────────────────────────── */
+
+#home-container {
+    height: 1fr;
+    padding: 1 2;
+}
+
+#home-title {
+    text-align: center;
+    text-style: bold;
+    color: $accent;
+    padding: 1 0;
+    width: 100%;
+}
+
+#home-body {
+    height: 1fr;
+    layout: horizontal;
+}
+
+#file-panel {
+    width: 1fr;
+    height: 100%;
+    border: solid $primary;
+    padding: 1 2;
+}
+
+#file-panel-title {
+    text-style: bold;
+    color: $text;
+    padding-bottom: 1;
+}
+
+#score-panel {
+    width: 40;
+    height: 100%;
+    border: solid $primary;
+    padding: 1 2;
+    margin-left: 1;
+}
+
+#score-title {
+    text-style: bold;
+    color: $text;
+    padding-bottom: 1;
+}
+
+#score-value {
+    text-align: center;
+    text-style: bold;
+    padding: 1 0;
+}
+
+#score-bar {
+    padding: 0 1;
+}
+
+#score-details {
+    padding-top: 1;
+}
+
+#suggestions-box {
+    padding-top: 1;
+    height: auto;
+    max-height: 12;
+}
+
+.action-bar {
+    dock: bottom;
+    height: 3;
+    padding: 0 2;
+    background: $panel;
+    layout: horizontal;
+    align: center middle;
+}
+
+.action-bar Button {
+    margin: 0 1;
+    min-width: 16;
+}
+
+/* ── Plan Screen ───────────────────────────────────────────── */
+
+#plan-container {
+    height: 1fr;
+    padding: 0;
+}
+
+#plan-header {
+    dock: top;
+    height: 3;
+    padding: 0 2;
+    background: $panel;
+    layout: horizontal;
+    align: center middle;
+}
+
+#plan-header-title {
+    width: 1fr;
+    text-style: bold;
+    color: $accent;
+}
+
+#plan-score-label {
+    width: auto;
+    text-style: bold;
+}
+
+#plan-body {
+    height: 1fr;
+    padding: 0 2;
+}
+
+#conversation-log {
+    height: 1fr;
+    border: solid $primary;
+    padding: 1 2;
+    overflow-y: auto;
+}
+
+.user-message {
+    color: $text;
+    padding: 0 0 1 0;
+    margin: 0 0 0 2;
+}
+
+.assistant-message {
+    color: $accent;
+    padding: 0 0 1 0;
+}
+
+.system-message {
+    color: $text-muted;
+    text-style: italic;
+    padding: 0 0 1 0;
+}
+
+#plan-input-area {
+    dock: bottom;
+    height: auto;
+    max-height: 8;
+    padding: 1 2;
+    background: $panel;
+}
+
+#plan-input {
+    height: auto;
+    min-height: 3;
+    max-height: 5;
+}
+
+/* ── Execution Screen ──────────────────────────────────────── */
+
+#exec-container {
+    height: 1fr;
+    padding: 1 2;
+}
+
+#exec-title {
+    text-align: center;
+    text-style: bold;
+    color: $accent;
+    padding: 1 0;
+}
+
+#steps-panel {
+    height: auto;
+    max-height: 16;
+    border: solid $primary;
+    padding: 1 2;
+}
+
+.step-row {
+    height: 3;
+    layout: horizontal;
+    padding: 0 1;
+}
+
+.step-icon {
+    width: 4;
+    text-align: center;
+}
+
+.step-title {
+    width: 1fr;
+}
+
+.step-detail {
+    width: 1fr;
+    color: $text-muted;
+    text-align: right;
+}
+
+#exec-log {
+    height: 1fr;
+    border: solid $primary;
+    padding: 1 2;
+    margin-top: 1;
+    overflow-y: auto;
+}
+
+#exec-footer {
+    dock: bottom;
+    height: 3;
+    padding: 0 2;
+    background: $panel;
+    layout: horizontal;
+    align: center middle;
+}
+
+#exec-footer Button {
+    margin: 0 1;
+}
+
+/* ── Requirements Viewer ───────────────────────────────────── */
+
+#req-container {
+    height: 1fr;
+    padding: 1 2;
+}
+
+#req-title {
+    text-style: bold;
+    color: $accent;
+    padding: 1 0;
+    text-align: center;
+}
+
+#req-markdown {
+    height: 1fr;
+    border: solid $primary;
+    padding: 1 2;
+    overflow-y: auto;
+}
+
+#req-footer {
+    dock: bottom;
+    height: 3;
+    padding: 0 2;
+    background: $panel;
+    layout: horizontal;
+    align: center middle;
+}
+
+#req-footer Button {
+    margin: 0 1;
+}

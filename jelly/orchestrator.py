@@ -1,3 +1,8 @@
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+
 from rich.console import Console
 
 from jelly.agents.programmer import Programmer
@@ -9,7 +14,49 @@ from jelly.utils import extract_signatures, read_file, write_files
 console = Console()
 
 
-def run_task(requirements_path: str, project_dir: str) -> dict:
+@dataclass
+class ProgressEvent:
+    """A structured progress update emitted during pipeline execution."""
+
+    step: int
+    total_steps: int
+    title: str
+    status: str  # "running" | "complete" | "failed"
+    detail: str
+    iteration: int = 0
+
+
+ProgressCallback = Callable[[ProgressEvent], None] | None
+
+
+def _emit(
+    callback: ProgressCallback,
+    step: int,
+    title: str,
+    status: str,
+    detail: str,
+    iteration: int = 0,
+) -> None:
+    total = 5
+    event = ProgressEvent(step, total, title, status, detail, iteration)
+
+    if callback is not None:
+        callback(event)
+        return
+
+    if status == "running":
+        console.print(f"\n[bold cyan]Step {step}:[/] {title}")
+    elif status == "complete":
+        console.print(f"  {detail}")
+    elif status == "failed":
+        console.print(f"  [bold red]{detail}[/]")
+
+
+def run_task(
+    requirements_path: str,
+    project_dir: str,
+    on_progress: ProgressCallback = None,
+) -> dict:
     """Run the full generate-test-fix loop.
 
     1. Read requirements and extract function signatures.
@@ -23,6 +70,7 @@ def run_task(requirements_path: str, project_dir: str) -> dict:
     Args:
         requirements_path: Path to the requirements markdown file.
         project_dir: Output directory for generated src/ and tests/.
+        on_progress: Optional callback for structured progress events.
 
     Returns:
         Final structured test results dict.
@@ -31,34 +79,42 @@ def run_task(requirements_path: str, project_dir: str) -> dict:
     requirements = read_file(requirements_path)
     signatures = extract_signatures(requirements)
 
-    console.rule("[bold blue]Jelly — Multi-Agent Coding System")
+    if on_progress is None:
+        console.rule("[bold blue]Jelly — Multi-Agent Coding System")
 
-    # Step 1: Design tests (analyze reqs, install MCP tools, generate tests)
-    console.print("\n[bold cyan]Step 1:[/] Designing tests from requirements...")
+    # Step 1: Design tests
+    _emit(on_progress, 1, "Designing tests from requirements...", "running", "")
     test_designer = TestDesigner(config)
     design = test_designer.design_tests(requirements, signatures)
     test_files = design.unit_test_files
     mcp_plan = design.mcp_test_plan
-    console.print(f"  Generated {len(test_files)} test file(s)")
+    detail = f"Generated {len(test_files)} test file(s)"
     if mcp_plan.steps:
-        console.print(
-            f"  MCP test plan: {len(mcp_plan.steps)} step(s) across "
-            f"{len(mcp_plan.servers)} server(s)"
+        detail += (
+            f", MCP plan: {len(mcp_plan.steps)} step(s) "
+            f"across {len(mcp_plan.servers)} server(s)"
         )
+    _emit(on_progress, 1, "Designing tests from requirements...", "complete", detail)
 
     # Step 2: Generate code
-    console.print("\n[bold cyan]Step 2:[/] Generating code from requirements...")
+    _emit(on_progress, 2, "Generating code from requirements...", "running", "")
     programmer = Programmer(config)
     code_files = programmer.generate(requirements)
-    console.print(f"  Generated {len(code_files)} source file(s)")
+    _emit(
+        on_progress, 2, "Generating code from requirements...", "complete",
+        f"Generated {len(code_files)} source file(s)",
+    )
 
-    # Step 3: Adapt tests to match actual code
-    console.print("\n[bold cyan]Step 3:[/] Adapting tests to match generated code...")
+    # Step 3: Adapt tests
+    _emit(on_progress, 3, "Adapting tests to match generated code...", "running", "")
     test_files = test_designer.adapt_tests(code_files, test_files)
-    console.print(f"  Adapted {len(test_files)} test file(s)")
+    _emit(
+        on_progress, 3, "Adapting tests to match generated code...", "complete",
+        f"Adapted {len(test_files)} test file(s)",
+    )
 
     # Step 4: Test and iterate
-    console.print("\n[bold cyan]Step 4:[/] Testing and iterating...\n")
+    _emit(on_progress, 4, "Testing and iterating...", "running", "")
     executor = TestExecutor(config)
     results: dict = {}
 
@@ -66,34 +122,37 @@ def run_task(requirements_path: str, project_dir: str) -> dict:
         results = executor.run_all(code_files, test_files, mcp_plan, project_dir)
 
         if results["all_passed"]:
-            console.print(
-                f"  [bold green]✅ All {results['total_tests']} tests passed "
-                f"(iteration {i})[/]"
+            _emit(
+                on_progress, 4, "Testing and iterating...", "complete",
+                f"All {results['total_tests']} tests passed (iteration {i})",
+                iteration=i,
             )
             break
 
-        console.print(
-            f"  [bold red]❌ Iteration {i}: "
-            f"{results['failed']}/{results['total_tests']} failed[/]"
-        )
+        msg = f"Iteration {i}: {results['failed']}/{results['total_tests']} failed"
+        _emit(on_progress, 4, "Testing and iterating...", "running", msg, iteration=i)
 
         if i < config.max_fix_iterations:
-            console.print("  Feeding errors back to Programmer...")
             feedback = executor.format_feedback(results)
             code_files = programmer.refine(requirements, code_files, feedback, i)
-            console.print(f"  Refined {len(code_files)} source file(s)")
-            console.print("  Re-adapting tests to refined code...")
             test_files = test_designer.adapt_tests(code_files, test_files)
-            console.print(f"  Adapted {len(test_files)} test file(s)\n")
         else:
-            console.print("  [yellow]Max iterations reached.[/]")
+            _emit(
+                on_progress, 4, "Testing and iterating...", "failed",
+                f"Max iterations reached — {results['failed']} test(s) still failing",
+                iteration=i,
+            )
 
     # Step 5: Write outputs
-    console.print(f"\n[bold cyan]Step 5:[/] Writing output to [bold]{project_dir}[/]")
+    _emit(on_progress, 5, f"Writing output to {project_dir}...", "running", "")
     write_files(f"{project_dir}/src", code_files)
     write_files(f"{project_dir}/tests", test_files)
-    console.print("  Done.\n")
+    _emit(
+        on_progress, 5, f"Writing output to {project_dir}...", "complete",
+        f"Wrote {len(code_files)} source + {len(test_files)} test file(s)",
+    )
 
-    console.rule("[bold blue]Complete")
+    if on_progress is None:
+        console.rule("[bold blue]Complete")
 
     return results
