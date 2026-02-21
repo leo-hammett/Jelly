@@ -2,8 +2,8 @@
 Test driven AI agent programming development.
 
 What we want to achieve:
-1. Agent automatically configures required prompts and mcp's. (We should give a list of recommended ones, then give links to markets then tell it to make the MCP's itself). It needs to be able to test the specific thing it makes.
-2. Testing agent tests the code and keeps giving feedback and iterating based on performance until the code works well.
+1. Testing agent tests the code and keeps giving feedback and iterating based on performance until the code works well.
+2. Agent automatically configures required system prompts and mcp's. (We should give a list of recommended ones, then give links to markets then tell it to make the MCP's itself). The Jelly system needs to be able to test the specific thing it makes, which will mean it needs the MCP's to do so. Once the MCP's are installed it should use the same verificaiton techniques to make sure the MCP's work as the testing agent system that make sure the built code works.
 3. We shift from a history based context paradigm to a documentation based context paradigm to be more model effective and efficient.
 
 What is Done Thus Far:
