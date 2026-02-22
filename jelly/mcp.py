@@ -234,6 +234,26 @@ def sidecar_launch_command(server: MCPServer) -> list[str]:
     )
 
 
+def preferred_sidecar_launch_mode(server: MCPServer) -> str:
+    """Pick sidecar launch mode with native SSE preferred when supported."""
+    return "native_sse" if _looks_like_playwright_sidecar(server) else "bridge"
+
+
+def native_sidecar_launch_command(
+    server: MCPServer,
+    host: str,
+    port: int,
+) -> list[str] | None:
+    """Build a native sidecar launch command when package supports host/port."""
+    if not _looks_like_playwright_sidecar(server):
+        return None
+    launch_cmd = sidecar_launch_command(server)
+    command = list(launch_cmd)
+    _set_cli_option(command, "--host", str(host))
+    _set_cli_option(command, "--port", str(port))
+    return command
+
+
 def sidecar_install_command(server: MCPServer) -> list[str] | None:
     """Resolve install command for dynamic sidecars."""
     if server.install_cmd:
@@ -429,18 +449,61 @@ def start_server_for_transport(
                 f"MCP server '{server.name}' has no HTTP/SSE endpoint configured "
                 f"(set {env_name})."
             )
-        _send_jsonrpc_http(
-            endpoint,
-            "initialize",
-            {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "jelly", "version": "1.0"},
-            },
-            timeout=request_timeout,
-            logger=logger,
-            server_name=server.name,
-        )
+        try:
+            initialize_response = _send_jsonrpc_http(
+                endpoint,
+                "initialize",
+                {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "jelly", "version": "1.0"},
+                },
+                timeout=request_timeout,
+                logger=logger,
+                server_name=server.name,
+            )
+        except TimeoutError as exc:
+            raise RuntimeError(
+                f"HTTP/SSE initialize timeout for MCP server '{server.name}' at "
+                f"{endpoint} (timeout_category=initialize_timeout): {exc}"
+            ) from exc
+        except Exception as exc:
+            raise RuntimeError(
+                f"HTTP/SSE initialize transport failure for MCP server '{server.name}' "
+                f"at {endpoint} (timeout_category=initialize_transport_error): {exc}"
+            ) from exc
+
+        if "error" in initialize_response:
+            raise RuntimeError(
+                f"HTTP/SSE initialize returned error for MCP server '{server.name}' at "
+                f"{endpoint}: {initialize_response['error']}"
+            )
+        if "result" not in initialize_response:
+            raise RuntimeError(
+                f"HTTP/SSE initialize returned no result for MCP server '{server.name}' "
+                f"at {endpoint}: {initialize_response}"
+            )
+
+        try:
+            _send_notification_http(
+                endpoint,
+                "notifications/initialized",
+                timeout=request_timeout,
+                logger=logger,
+                server_name=server.name,
+            )
+        except TimeoutError as exc:
+            raise RuntimeError(
+                f"HTTP/SSE initialized notification timeout for MCP server "
+                f"'{server.name}' at {endpoint} "
+                f"(timeout_category=initialized_timeout): {exc}"
+            ) from exc
+        except Exception as exc:
+            raise RuntimeError(
+                f"HTTP/SSE initialized notification failure for MCP server "
+                f"'{server.name}' at {endpoint} "
+                f"(timeout_category=initialized_transport_error): {exc}"
+            ) from exc
         return None
 
     return start_server(
@@ -648,6 +711,10 @@ def _send_jsonrpc_http(
     try:
         with urlopen(req, timeout=timeout) as resp:
             raw = resp.read()
+    except TimeoutError as exc:
+        raise TimeoutError(
+            f"Timed out reaching MCP endpoint {endpoint} during '{method}'"
+        ) from exc
     except HTTPError as exc:
         raise RuntimeError(
             f"HTTP {exc.code} from MCP endpoint {endpoint} during '{method}'"
@@ -676,8 +743,82 @@ def _send_jsonrpc_http(
         endpoint=endpoint,
         method=method,
         msg_id=msg_id,
+        has_error="error" in payload,
+        error_payload=payload.get("error"),
     )
     return payload
+
+
+def _send_notification_http(
+    endpoint: str,
+    method: str,
+    params: dict[str, Any] | None = None,
+    timeout: float = 30.0,
+    logger: RunLogger | None = None,
+    server_name: str | None = None,
+) -> None:
+    """Send a JSON-RPC notification over HTTP without requiring a response body."""
+    request_payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+    if params is not None:
+        request_payload["params"] = params
+    body = json.dumps(request_payload, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
+    req = Request(
+        endpoint,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    _log(
+        logger,
+        "DEBUG",
+        "notification_http.sent",
+        server=server_name,
+        endpoint=endpoint,
+        method=method,
+    )
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+    except TimeoutError as exc:
+        raise TimeoutError(
+            f"Timed out reaching MCP endpoint {endpoint} during notification '{method}'"
+        ) from exc
+    except HTTPError as exc:
+        raise RuntimeError(
+            f"HTTP {exc.code} from MCP endpoint {endpoint} during notification '{method}'"
+        ) from exc
+    except URLError as exc:
+        raise RuntimeError(
+            f"Unable to reach MCP endpoint {endpoint} during notification "
+            f"'{method}': {exc.reason}"
+        ) from exc
+
+    if raw:
+        try:
+            payload = json.loads(raw.decode("utf-8", errors="replace"))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"Invalid JSON response from MCP endpoint {endpoint} during "
+                f"notification '{method}'"
+            ) from exc
+        if isinstance(payload, dict) and payload.get("error") is not None:
+            raise RuntimeError(
+                f"MCP endpoint {endpoint} returned error for notification "
+                f"'{method}': {payload['error']}"
+            )
+    _log(
+        logger,
+        "DEBUG",
+        "notification_http.complete",
+        server=server_name,
+        endpoint=endpoint,
+        method=method,
+    )
 
 
 def _write_message(proc: subprocess.Popen, message: dict[str, Any]) -> None:
@@ -770,6 +911,23 @@ def _normalize_install_cmd(install_cmd: str | list[str]) -> list[str]:
     if isinstance(install_cmd, list):
         return [str(part) for part in install_cmd if str(part).strip()]
     return []
+
+
+def _looks_like_playwright_sidecar(server: MCPServer) -> bool:
+    package = (server.sidecar_package or "").lower()
+    if "@playwright/mcp" in package:
+        return True
+    command_tokens = [server.command, *server.args, *server.sidecar_command]
+    return any("@playwright/mcp" in token.lower() for token in command_tokens)
+
+
+def _set_cli_option(command: list[str], option: str, value: str) -> None:
+    if option in command:
+        index = command.index(option)
+        if index + 1 < len(command):
+            command[index + 1] = value
+            return
+    command.extend([option, value])
 
 
 def _assert_stdio_server_allowed(

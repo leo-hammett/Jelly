@@ -188,3 +188,103 @@ def test_design_tests_merges_dynamic_sidecars_with_bootstrap(monkeypatch) -> Non
     )
 
     assert {s.name for s in result.installed_servers} == {"filesystem", "github"}
+
+
+def test_design_tests_skips_dynamic_selection_when_disabled(monkeypatch) -> None:
+    config = Config()
+    config.mcp_dynamic_sidecars_enabled = False
+    designer = DesignerAgent(config)
+
+    monkeypatch.setattr(
+        designer,
+        "_analyze_requirements",
+        lambda _requirements: {
+            "testing_needs": [{"category": "browser", "description": "ui flow"}]
+        },
+    )
+    monkeypatch.setattr(
+        designer,
+        "_select_dynamic_sidecars",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("dynamic selection should not run when disabled")
+        ),
+    )
+    monkeypatch.setattr(designer, "_select_tools", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(designer, "_install_tools", lambda _servers: [])
+    monkeypatch.setattr(
+        designer,
+        "_generate_test_plan",
+        lambda _requirements, _signatures, _servers: (
+            {"test_a.py": "def test_a():\n    assert True\n"},
+            MCPTestPlan(servers=[], steps=[], reason="no_available_servers"),
+        ),
+    )
+
+    result = designer.design_tests(
+        requirements="# req",
+        function_signatures=["def x() -> int"],
+        project_dir=".",
+    )
+    assert set(result.unit_test_files.keys()) == {"test_a.py"}
+
+
+def test_select_dynamic_sidecars_dedupes_and_filters(monkeypatch) -> None:
+    config = Config()
+    config.mcp_dynamic_sidecars_enabled = True
+    config.mcp_dynamic_max_sidecars_per_run = 4
+    designer = DesignerAgent(config)
+
+    monkeypatch.setattr(
+        "jelly.agents.test_designer.BaseAgent.call",
+        lambda *_args, **_kwargs: "```json\n[]\n```",
+    )
+    monkeypatch.setattr(
+        designer,
+        "_parse_json_response",
+        lambda _response: [
+            {
+                "name": "github",
+                "transport": "http_sse",
+                "package": "@modelcontextprotocol/server-github",
+                "sidecar_cmd": ["npx", "-y", "@modelcontextprotocol/server-github"],
+            },
+            {
+                "name": "github",
+                "transport": "http_sse",
+                "package": "@modelcontextprotocol/server-github-duplicate",
+                "sidecar_cmd": [
+                    "npx",
+                    "-y",
+                    "@modelcontextprotocol/server-github-duplicate",
+                ],
+            },
+            {
+                "name": "github_alt",
+                "transport": "http_sse",
+                "package": "@modelcontextprotocol/server-github",
+                "sidecar_cmd": ["npx", "-y", "@modelcontextprotocol/server-github"],
+            },
+            {
+                "name": "bad_transport",
+                "transport": "stdio",
+                "package": "@modelcontextprotocol/server-github",
+                "sidecar_cmd": ["npx", "-y", "@modelcontextprotocol/server-github"],
+            },
+            {
+                "name": "missing_cmd",
+                "transport": "http_sse",
+            },
+            {
+                "name": "playwright",
+                "transport": "http_sse",
+                "package": "@playwright/mcp",
+                "sidecar_cmd": ["npx", "-y", "@playwright/mcp"],
+            },
+        ],
+    )
+
+    servers = designer._select_dynamic_sidecars(
+        {"testing_needs": [{"category": "browser", "description": "ui"}]},
+        ".",
+    )
+    assert [s.name for s in servers] == ["github", "playwright"]

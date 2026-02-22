@@ -289,3 +289,125 @@ def test_failed_mcp_step_is_skipped_and_passed_next_round(monkeypatch) -> None:
     assert second["passed"] == 1
     assert second["mcp_summary"]["steps_skipped_quarantined"] == 1
     assert calls["count"] == 1
+
+
+def test_failed_server_quarantines_all_server_steps(monkeypatch) -> None:
+    executor = ExecutorAgent(Config())
+    plan = MCPTestPlan(
+        servers=[MCPServer(name="svc", command="noop")],
+        steps=[
+            MCPTestStep(
+                description="step one",
+                server="svc",
+                tool="do_thing",
+                arguments={},
+                expected="ok",
+            ),
+            MCPTestStep(
+                description="step two",
+                server="svc",
+                tool="do_other",
+                arguments={},
+                expected="ok",
+            ),
+        ],
+    )
+
+    class _Proc:
+        pass
+
+    starts = {"count": 0}
+    calls = {"count": 0}
+
+    def fake_start_server(_server, **_kwargs):
+        starts["count"] += 1
+        return _Proc()
+
+    def fail_first_tool(_server, _proc, _tool_name, _arguments, **_kwargs):
+        calls["count"] += 1
+        raise RuntimeError("server exploded")
+
+    monkeypatch.setattr(
+        "jelly.agents.test_executor.start_server_for_transport",
+        fake_start_server,
+    )
+    monkeypatch.setattr(
+        "jelly.agents.test_executor.call_tool_for_server",
+        fail_first_tool,
+    )
+    monkeypatch.setattr(
+        "jelly.agents.test_executor.stop_server_for_transport",
+        lambda _server, _proc: None,
+    )
+
+    first = executor.run_mcp_tests(plan, project_dir=".")
+    second = executor.run_mcp_tests(plan, project_dir=".")
+
+    assert first["failed"] == 1
+    assert first["passed"] == 1
+    assert first["mcp_summary"]["servers_quarantined"] == 1
+    assert first["mcp_summary"]["quarantined_servers"] == ["svc"]
+    assert second["all_passed"] is True
+    assert second["passed"] == 2
+    assert second["failed"] == 0
+    assert second["mcp_summary"]["steps_skipped_quarantined"] == 2
+    assert starts["count"] == 1
+    assert calls["count"] == 1
+
+
+def test_dynamic_provision_failure_not_retried_next_round(monkeypatch) -> None:
+    class _Manager:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def ensure_running(self, _server):
+            self.calls += 1
+            raise RuntimeError("npm 404")
+
+        def summary(self):
+            return {
+                "dynamic_installed": 0,
+                "dynamic_launched": 0,
+                "dynamic_reused": 0,
+                "dynamic_failed_servers": ["fetch"],
+                "dynamic_failed_install_servers": ["fetch"],
+                "dynamic_failed_install_packages": ["@bad/fetch"],
+                "dynamic_launch_modes": {},
+            }
+
+    manager = _Manager()
+    executor = ExecutorAgent(Config(), sidecar_manager=manager)
+    plan = MCPTestPlan(
+        servers=[
+            MCPServer(
+                name="fetch",
+                transport="http_sse",
+                endpoint=None,
+                dynamic_sidecar=True,
+                sidecar_package="@bad/fetch",
+                sidecar_command=["npx", "-y", "@bad/fetch"],
+            )
+        ],
+        steps=[
+            MCPTestStep(
+                description="fetch attempt",
+                server="fetch",
+                tool="get_url",
+                arguments={"url": "https://example.com"},
+                expected="ok",
+            )
+        ],
+    )
+
+    monkeypatch.setattr(
+        "jelly.agents.test_executor.stop_server_for_transport",
+        lambda _server, _proc: None,
+    )
+
+    first = executor.run_mcp_tests(plan, project_dir=".")
+    second = executor.run_mcp_tests(plan, project_dir=".")
+
+    assert first["all_passed"] is False
+    assert second["all_passed"] is True
+    assert second["mcp_summary"]["steps_skipped_quarantined"] == 1
+    assert manager.calls == 1

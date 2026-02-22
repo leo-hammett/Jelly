@@ -230,7 +230,12 @@ class TestDesigner:
             project_dir=str(Path(project_dir).resolve()),
         )
         analysis = self._analyze_requirements(requirements)
-        dynamic_servers = self._select_dynamic_sidecars(analysis, project_dir)
+        dynamic_servers: list[MCPServer] = []
+        if (
+            self.config.mcp_dynamic_sidecars_enabled
+            and self._has_non_unit_testing_needs(analysis)
+        ):
+            dynamic_servers = self._select_dynamic_sidecars(analysis, project_dir)
         if preinstalled_servers is None:
             servers = self._select_tools(analysis, project_dir)
             installed = self._merge_servers_by_name(
@@ -287,6 +292,14 @@ class TestDesigner:
             return []
         return list(preinstalled_servers)
 
+    @staticmethod
+    def _has_non_unit_testing_needs(analysis: dict) -> bool:
+        testing_needs = analysis.get("testing_needs", [])
+        return any(
+            isinstance(need, dict) and str(need.get("category", "")).strip() != "unit"
+            for need in testing_needs
+        )
+
     def _select_dynamic_sidecars(
         self,
         analysis: dict,
@@ -297,7 +310,9 @@ class TestDesigner:
             return []
         testing_needs = analysis.get("testing_needs", [])
         needs_beyond_unit = [
-            n for n in testing_needs if isinstance(n, dict) and n.get("category") != "unit"
+            n
+            for n in testing_needs
+            if isinstance(n, dict) and str(n.get("category", "")).strip() != "unit"
         ]
         if not needs_beyond_unit:
             return []
@@ -338,12 +353,48 @@ class TestDesigner:
             return []
 
         dynamic_servers: list[MCPServer] = []
+        seen_names: set[str] = set()
+        seen_specs: set[str] = set()
+        max_servers = int(self.config.mcp_dynamic_max_sidecars_per_run)
         for entry in raw:
             if not isinstance(entry, dict):
                 continue
             normalized = self._normalize_dynamic_sidecar_entry(entry, workspace)
-            if normalized:
-                dynamic_servers.append(normalized)
+            if not normalized:
+                continue
+
+            normalized_name = normalized.name.strip().lower()
+            spec_key = (normalized.sidecar_package or "").strip().lower()
+            if not spec_key:
+                spec_key = " ".join(normalized.sidecar_command).strip().lower()
+
+            if normalized_name in seen_names:
+                self._log(
+                    "WARNING",
+                    "select_dynamic_sidecars.duplicate_name_dropped",
+                    server=normalized.name,
+                )
+                continue
+            if spec_key and spec_key in seen_specs:
+                self._log(
+                    "WARNING",
+                    "select_dynamic_sidecars.duplicate_spec_dropped",
+                    server=normalized.name,
+                )
+                continue
+
+            seen_names.add(normalized_name)
+            if spec_key:
+                seen_specs.add(spec_key)
+            dynamic_servers.append(normalized)
+            if len(dynamic_servers) >= max_servers:
+                self._log(
+                    "INFO",
+                    "select_dynamic_sidecars.max_limit_reached",
+                    selected=len(dynamic_servers),
+                    max_allowed=max_servers,
+                )
+                break
         self._log(
             "INFO",
             "select_dynamic_sidecars.complete",
@@ -370,6 +421,7 @@ class TestDesigner:
         if not raw_name:
             raw_name = self._slug_name(raw_package)
         if not raw_name:
+            self._log("WARNING", "select_dynamic_sidecars.invalid_name")
             return None
 
         raw_sidecar_cmd = entry.get("sidecar_cmd", [])
@@ -388,7 +440,6 @@ class TestDesigner:
                 server=raw_name,
             )
             return None
-
         cmd_text = " ".join(sidecar_cmd).lower()
         if "server-filesystem" in cmd_text and filesystem_workspace not in sidecar_cmd:
             sidecar_cmd.append(filesystem_workspace)

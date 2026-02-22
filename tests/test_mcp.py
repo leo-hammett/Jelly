@@ -92,6 +92,62 @@ def test_build_bootstrap_servers_reads_sidecar_endpoints(monkeypatch, tmp_path) 
     assert servers[1].endpoint == "http://browser.example/mcp"
 
 
+def test_start_server_for_transport_http_initialize_error_blocks_start(monkeypatch) -> None:
+    server = mcp.MCPServer(
+        name="browser",
+        transport="http_sse",
+        endpoint="http://localhost:18888/mcp",
+    )
+    notification_calls = {"count": 0}
+
+    monkeypatch.setattr(
+        mcp,
+        "_send_jsonrpc_http",
+        lambda *_args, **_kwargs: {"error": {"code": -32000, "message": "boom"}},
+    )
+    monkeypatch.setattr(
+        mcp,
+        "_send_notification_http",
+        lambda *_args, **_kwargs: notification_calls.__setitem__(
+            "count", notification_calls["count"] + 1
+        ),
+    )
+
+    try:
+        mcp.start_server_for_transport(server, request_timeout=1)
+    except RuntimeError as exc:
+        assert "initialize returned error" in str(exc)
+    else:
+        raise AssertionError("Expected initialize error to fail startup")
+    assert notification_calls["count"] == 0
+
+
+def test_start_server_for_transport_http_sends_initialized_notification(monkeypatch) -> None:
+    server = mcp.MCPServer(
+        name="browser",
+        transport="http_sse",
+        endpoint="http://localhost:18889/mcp",
+    )
+    calls: list[tuple[str, str]] = []
+
+    def fake_send_jsonrpc_http(_endpoint, method, _params, **_kwargs):
+        calls.append(("request", method))
+        return {"result": {"serverInfo": {"name": "ok"}}}
+
+    def fake_send_notification_http(_endpoint, method, **_kwargs):
+        calls.append(("notification", method))
+
+    monkeypatch.setattr(mcp, "_send_jsonrpc_http", fake_send_jsonrpc_http)
+    monkeypatch.setattr(mcp, "_send_notification_http", fake_send_notification_http)
+
+    proc = mcp.start_server_for_transport(server, request_timeout=1)
+    assert proc is None
+    assert calls == [
+        ("request", "initialize"),
+        ("notification", "notifications/initialized"),
+    ]
+
+
 def test_bootstrap_servers_marks_missing_endpoints_unavailable(monkeypatch, tmp_path) -> None:
     config = Config()
     monkeypatch.delenv(config.mcp_filesystem_endpoint_env, raising=False)
@@ -102,6 +158,23 @@ def test_bootstrap_servers_marks_missing_endpoints_unavailable(monkeypatch, tmp_
     assert result.available_servers == []
     assert "filesystem" in result.unavailable
     assert "browser" in result.unavailable
+
+
+def test_playwright_native_sidecar_launch_mode_and_command() -> None:
+    server = mcp.MCPServer(
+        name="browser",
+        transport="http_sse",
+        dynamic_sidecar=True,
+        sidecar_package="@playwright/mcp",
+        sidecar_command=["npx", "-y", "@playwright/mcp"],
+    )
+    assert mcp.preferred_sidecar_launch_mode(server) == "native_sse"
+    cmd = mcp.native_sidecar_launch_command(server, "127.0.0.1", 7788)
+    assert cmd is not None
+    assert "--host" in cmd
+    assert "--port" in cmd
+    assert "127.0.0.1" in cmd
+    assert "7788" in cmd
 
 
 def test_call_tool_for_server_http_transport(monkeypatch) -> None:
@@ -216,4 +289,92 @@ def test_sidecar_manager_launches_and_reuses(monkeypatch, tmp_path) -> None:
     summary = manager.summary()
     assert summary["dynamic_launched"] == 1
     assert summary["dynamic_reused"] == 1
+    manager.stop_all()
+
+
+def test_sidecar_manager_caches_failed_package_installs(monkeypatch, tmp_path) -> None:
+    config = Config()
+    config.mcp_dynamic_sidecars_enabled = True
+    attempts = {"count": 0}
+
+    def fake_install_server(*_args, **_kwargs):
+        attempts["count"] += 1
+        return False
+
+    monkeypatch.setattr(sidecar_manager, "install_server", fake_install_server)
+    manager = sidecar_manager.MCPSidecarManager(config, str(tmp_path))
+    server_a = mcp.MCPServer(
+        name="fetch_a",
+        transport="http_sse",
+        dynamic_sidecar=True,
+        sidecar_package="@example/fetch-sidecar",
+        sidecar_command=["npx", "-y", "@example/fetch-sidecar"],
+    )
+    server_b = mcp.MCPServer(
+        name="fetch_b",
+        transport="http_sse",
+        dynamic_sidecar=True,
+        sidecar_package="@example/fetch-sidecar",
+        sidecar_command=["npx", "-y", "@example/fetch-sidecar"],
+    )
+
+    assert manager.install_if_needed(server_a) is False
+    assert manager.install_if_needed(server_b) is False
+    assert attempts["count"] == 1
+    summary = manager.summary()
+    assert summary["dynamic_failed_install_servers"] == ["fetch_a", "fetch_b"]
+    assert summary["dynamic_failed_install_packages"] == ["@example/fetch-sidecar"]
+
+
+def test_sidecar_manager_prefers_native_launch_for_playwright(monkeypatch, tmp_path) -> None:
+    config = Config()
+    config.mcp_dynamic_sidecars_enabled = True
+    config.mcp_dynamic_sidecar_base_port = 8820
+    config.mcp_dynamic_sidecar_port_span = 3
+    launches = []
+
+    class _FakeProc:
+        def __init__(self) -> None:
+            self._returncode = None
+
+        def poll(self):
+            return self._returncode
+
+        def terminate(self):
+            self._returncode = 0
+
+        def wait(self, timeout=None):  # noqa: ARG002
+            return 0
+
+        def kill(self):
+            self._returncode = -9
+
+    monkeypatch.setattr(sidecar_manager, "install_server", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(sidecar_manager, "_port_is_free", lambda _host, _port: True)
+    monkeypatch.setattr(
+        sidecar_manager,
+        "start_server_for_transport",
+        lambda _server, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        sidecar_manager.subprocess,
+        "Popen",
+        lambda cmd, **_kwargs: launches.append(cmd) or _FakeProc(),
+    )
+
+    manager = sidecar_manager.MCPSidecarManager(config, str(tmp_path))
+    server = mcp.MCPServer(
+        name="browser_dynamic",
+        transport="http_sse",
+        dynamic_sidecar=True,
+        sidecar_package="@playwright/mcp",
+        sidecar_command=["npx", "-y", "@playwright/mcp"],
+    )
+
+    endpoint = manager.ensure_running(server)
+    assert endpoint.endswith("/mcp")
+    assert launches
+    assert launches[0][:3] == ["npx", "-y", "@playwright/mcp"]
+    summary = manager.summary()
+    assert summary["dynamic_launch_modes"] == {"native_sse": 1}
     manager.stop_all()

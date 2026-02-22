@@ -32,6 +32,8 @@ class TestExecutor:
         self.sidecar_manager = sidecar_manager
         # MCP steps that failed once in this run are quarantined on later iterations.
         self._quarantined_mcp_steps: set[str] = set()
+        # Entire MCP servers that failed once in this run are quarantined too.
+        self._quarantined_mcp_servers: set[str] = set()
 
     def _log(self, level: str, operation: str, **fields) -> None:
         if self.logger:
@@ -134,6 +136,11 @@ class TestExecutor:
                 "dynamic_reused": 0,
                 "dynamic_failed": 0,
                 "dynamic_failed_servers": [],
+                "dynamic_launch_modes": {},
+                "dynamic_failed_install_servers": [],
+                "dynamic_failed_install_packages": [],
+                "servers_quarantined": len(self._quarantined_mcp_servers),
+                "quarantined_servers": sorted(self._quarantined_mcp_servers),
             }
             return results
 
@@ -153,6 +160,13 @@ class TestExecutor:
         )
         try:
             for server in plan.servers:
+                if server.name in self._quarantined_mcp_servers:
+                    self._log(
+                        "INFO",
+                        "run_mcp_tests.server_start_skipped_quarantined",
+                        server=server.name,
+                    )
+                    continue
                 if can_lazy_provision(server) and self.sidecar_manager is not None:
                     self._log(
                         "INFO",
@@ -201,6 +215,17 @@ class TestExecutor:
             failure_details: list[dict] = []
 
             for step in plan.steps:
+                if step.server in self._quarantined_mcp_servers:
+                    skipped_quarantined += 1
+                    passed += 1
+                    self._log(
+                        "INFO",
+                        "run_mcp_tests.server_quarantined_skip",
+                        step_description=step.description,
+                        server=step.server,
+                        tool=step.tool,
+                    )
+                    continue
                 step_key = self._step_key(step)
                 if step_key in self._quarantined_mcp_steps:
                     skipped_quarantined += 1
@@ -218,6 +243,7 @@ class TestExecutor:
                 if server is None:
                     failed += 1
                     self._quarantined_mcp_steps.add(step_key)
+                    self._quarantined_mcp_servers.add(step.server)
                     failure_details.append({
                         "test_name": step.description,
                         "error_type": "ServerNotFound",
@@ -240,6 +266,7 @@ class TestExecutor:
                         dynamic_failed.add(step.server)
                         failed += 1
                         self._quarantined_mcp_steps.add(step_key)
+                        self._quarantined_mcp_servers.add(step.server)
                         failure_details.append({
                             "test_name": step.description,
                             "error_type": "DynamicSidecarManagerMissing",
@@ -274,6 +301,7 @@ class TestExecutor:
                         dynamic_failed.add(server.name)
                         failed += 1
                         self._quarantined_mcp_steps.add(step_key)
+                        self._quarantined_mcp_servers.add(server.name)
                         failure_details.append({
                             "test_name": step.description,
                             "error_type": type(exc).__name__,
@@ -293,6 +321,7 @@ class TestExecutor:
                 if step.server not in procs:
                     failed += 1
                     self._quarantined_mcp_steps.add(step_key)
+                    self._quarantined_mcp_servers.add(step.server)
                     exc = startup_errors.get(step.server)
                     reason = (
                         str(exc)[:500]
@@ -355,6 +384,7 @@ class TestExecutor:
                     if step.expected and step.expected.lower() not in text.lower():
                         failed += 1
                         self._quarantined_mcp_steps.add(step_key)
+                        self._quarantined_mcp_servers.add(step.server)
                         failure_details.append({
                             "test_name": step.description,
                             "error_type": "AssertionError",
@@ -384,6 +414,7 @@ class TestExecutor:
                 except Exception as exc:
                     failed += 1
                     self._quarantined_mcp_steps.add(step_key)
+                    self._quarantined_mcp_servers.add(step.server)
                     failure_details.append({
                         "test_name": step.description,
                         "error_type": type(exc).__name__,
@@ -441,6 +472,17 @@ class TestExecutor:
                     ),
                     "dynamic_failed": len(all_dynamic_failed),
                     "dynamic_failed_servers": sorted(all_dynamic_failed),
+                    "dynamic_launch_modes": dict(
+                        manager_summary.get("dynamic_launch_modes", {})
+                    ),
+                    "dynamic_failed_install_servers": list(
+                        manager_summary.get("dynamic_failed_install_servers", [])
+                    ),
+                    "dynamic_failed_install_packages": list(
+                        manager_summary.get("dynamic_failed_install_packages", [])
+                    ),
+                    "servers_quarantined": len(self._quarantined_mcp_servers),
+                    "quarantined_servers": sorted(self._quarantined_mcp_servers),
                 },
             }
             self._log(
@@ -520,6 +562,11 @@ class TestExecutor:
             "dynamic_reused": 0,
             "dynamic_failed": 0,
             "dynamic_failed_servers": [],
+            "dynamic_launch_modes": {},
+            "dynamic_failed_install_servers": [],
+            "dynamic_failed_install_packages": [],
+            "servers_quarantined": len(self._quarantined_mcp_servers),
+            "quarantined_servers": sorted(self._quarantined_mcp_servers),
         }
         self._log(
             "INFO",

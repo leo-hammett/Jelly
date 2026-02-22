@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -313,7 +314,9 @@ def run_task(
                 meta={"kind": "mcp_bootstrap"},
             )
 
-    # Step 1: Design tests
+    # Step 1 + Step 2: design tests and generate code in parallel.
+    test_designer = TestDesigner(config, logger=logger)
+    programmer = Programmer(config)
     _emit(
         on_progress, 1, "Designing tests from requirements...", "running", "",
         total_steps=total_steps,
@@ -336,14 +339,45 @@ def run_task(
         step=1,
         title="Design tests",
     )
-    test_designer = TestDesigner(config, logger=logger)
-    with logger.timed("orchestrator", "design_tests"):
-        design = test_designer.design_tests(
-            requirements,
-            signatures,
-            project_dir,
-            preinstalled_servers=bootstrap_servers_for_design,
-        )
+    _emit(
+        on_progress, 2, "Generating code from requirements...", "running", "",
+        total_steps=total_steps,
+    )
+    _emit(
+        on_progress,
+        2,
+        "Generating code from requirements...",
+        "running",
+        "Programmer is drafting source files from requirements.",
+        total_steps=total_steps,
+    )
+    logger.event(
+        "INFO",
+        "orchestrator",
+        "step.start",
+        step=2,
+        title="Generate code",
+    )
+
+    def _design_tests_job():
+        with logger.timed("orchestrator", "design_tests"):
+            return test_designer.design_tests(
+                requirements,
+                signatures,
+                project_dir,
+                preinstalled_servers=bootstrap_servers_for_design,
+            )
+
+    def _generate_code_job():
+        with logger.timed("orchestrator", "generate_code"):
+            return programmer.generate(requirements)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        design_future = pool.submit(_design_tests_job)
+        code_future = pool.submit(_generate_code_job)
+        design = design_future.result()
+        code_files = code_future.result()
+
     test_files = design.unit_test_files
     mcp_plan = design.mcp_test_plan
     detail = f"Generated {len(test_files)} test file(s)"
@@ -389,30 +423,6 @@ def run_task(
         mcp_servers=len(mcp_plan.servers),
         mcp_steps=len(mcp_plan.steps),
     )
-
-    # Step 2: Generate code
-    _emit(
-        on_progress, 2, "Generating code from requirements...", "running", "",
-        total_steps=total_steps,
-    )
-    _emit(
-        on_progress,
-        2,
-        "Generating code from requirements...",
-        "running",
-        "Programmer is drafting source files from requirements.",
-        total_steps=total_steps,
-    )
-    logger.event(
-        "INFO",
-        "orchestrator",
-        "step.start",
-        step=2,
-        title="Generate code",
-    )
-    programmer = Programmer(config)
-    with logger.timed("orchestrator", "generate_code"):
-        code_files = programmer.generate(requirements)
     _emit(
         on_progress, 2, "Generating code from requirements...", "complete",
         f"Generated {len(code_files)} source file(s)",
@@ -580,8 +590,28 @@ def run_task(
                 iteration=i,
                 feedback_length=len(feedback),
             )
+            previous_code_files = dict(code_files)
             code_files = programmer.refine(requirements, code_files, feedback, i)
-            test_files = test_designer.adapt_tests(code_files, test_files)
+            should_adapt, adapt_reason = _should_readapt_tests(
+                results,
+                previous_code_files,
+                code_files,
+            )
+            if should_adapt:
+                test_files = test_designer.adapt_tests(code_files, test_files)
+            else:
+                _emit(
+                    on_progress,
+                    4,
+                    "Testing and iterating...",
+                    "running",
+                    (
+                        "Skipping test adaptation this iteration; failures look "
+                        "MCP/runtime-only."
+                    ),
+                    iteration=i,
+                    total_steps=total_steps,
+                )
             logger.event(
                 "INFO",
                 "orchestrator",
@@ -589,6 +619,8 @@ def run_task(
                 iteration=i,
                 code_files=len(code_files),
                 test_files=len(test_files),
+                adapt_tests_rerun=should_adapt,
+                adapt_tests_reason=adapt_reason,
             )
         else:
             failed_detail = (
@@ -786,4 +818,74 @@ def _mcp_results_summary(results: dict) -> str:
             f"{detail} Dynamic sidecars: installed {dynamic_installed}, "
             f"launched {dynamic_launched}, reused {dynamic_reused}, failed {dynamic_failed}."
         )
+        launch_modes = summary.get("dynamic_launch_modes", {})
+        if isinstance(launch_modes, dict) and launch_modes:
+            modes_text = ", ".join(
+                f"{name}={count}"
+                for name, count in sorted(launch_modes.items(), key=lambda item: item[0])
+            )
+            detail = f"{detail} Launch modes: {modes_text}."
     return detail
+
+
+_ADAPT_RELEVANT_ERROR_TYPES = {
+    "importerror",
+    "modulenotfounderror",
+    "nameerror",
+    "attributeerror",
+    "syntaxerror",
+    "indentationerror",
+}
+_ADAPT_RELEVANT_TEXT_FRAGMENTS = (
+    "no module named",
+    "cannot import name",
+    "importerror",
+    "nameerror",
+    "attributeerror",
+    "has no attribute",
+    "is not defined",
+    "found no collectors",
+    "fixture",
+    "syntaxerror",
+    "indentationerror",
+)
+
+
+def _should_readapt_tests(
+    results: dict,
+    previous_code_files: dict[str, str],
+    current_code_files: dict[str, str],
+) -> tuple[bool, str]:
+    if _code_module_structure_changed(previous_code_files, current_code_files):
+        return True, "code_structure_changed"
+
+    failure_details = results.get("failure_details", [])
+    if not isinstance(failure_details, list):
+        return False, "no_failure_details"
+
+    for failure in failure_details:
+        if _failure_requires_test_adaptation(failure):
+            return True, "import_symbol_or_test_structure_failure"
+    return False, "mcp_or_runtime_only"
+
+
+def _code_module_structure_changed(
+    previous_code_files: dict[str, str],
+    current_code_files: dict[str, str],
+) -> bool:
+    return sorted(previous_code_files.keys()) != sorted(current_code_files.keys())
+
+
+def _failure_requires_test_adaptation(failure: object) -> bool:
+    if not isinstance(failure, dict):
+        return False
+    error_type = str(failure.get("error_type", "")).strip().lower()
+    if error_type in _ADAPT_RELEVANT_ERROR_TYPES:
+        return True
+    text_parts = [
+        str(failure.get("test_name", "")),
+        str(failure.get("error_message", "")),
+        str(failure.get("traceback", "")),
+    ]
+    merged = " ".join(text_parts).lower()
+    return any(fragment in merged for fragment in _ADAPT_RELEVANT_TEXT_FRAGMENTS)

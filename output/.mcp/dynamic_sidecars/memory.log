@@ -1,0 +1,13 @@
+Traceback (most recent call last):
+  File "/Volumes/makingthings/git-repos/jelly/Jelly/jelly/mcp_sidecar.py", line 280, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/Volumes/makingthings/git-repos/jelly/Jelly/jelly/mcp_sidecar.py", line 272, in main
+    server.serve_forever(poll_interval=0.2)
+  File "/Users/leohammett/.local/share/uv/python/cpython-3.11.14-macos-aarch64-none/lib/python3.11/socketserver.py", line 233, in serve_forever
+    ready = selector.select(poll_interval)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/leohammett/.local/share/uv/python/cpython-3.11.14-macos-aarch64-none/lib/python3.11/selectors.py", line 415, in select
+    fd_event_list = self._selector.poll(timeout)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
