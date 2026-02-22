@@ -23,8 +23,8 @@ def test_install_server_uses_non_shell_command(monkeypatch) -> None:
 
     server = mcp.MCPServer(
         name="playwright",
-        command="npx",
-        args=["-y", "@playwright/mcp@latest"],
+        command="python",
+        args=["server.py"],
         install_cmd="npm install -g @playwright/mcp",
     )
 
@@ -55,10 +55,24 @@ def test_start_server_includes_stderr_on_boot_failure(monkeypatch) -> None:
 
     monkeypatch.setattr(mcp.subprocess, "Popen", lambda *args, **kwargs: _FakeProc())
 
-    server = mcp.MCPServer(name="broken", command="npx", args=["-y", "broken-server"])
+    server = mcp.MCPServer(name="broken", command="python", args=["broken_server.py"])
     try:
         mcp.start_server(server, startup_wait=0.2)
     except RuntimeError as exc:
         assert "boom stderr" in str(exc)
     else:
         raise AssertionError("Expected RuntimeError from startup failure")
+
+
+def test_start_server_blocks_node_family_stdio() -> None:
+    server = mcp.MCPServer(
+        name="filesystem",
+        command="npx",
+        args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp/workspace"],
+    )
+    try:
+        mcp.start_server(server)
+    except RuntimeError as exc:
+        assert "blocked for stdio transport" in str(exc)
+    else:
+        raise AssertionError("Expected RuntimeError from node stdio policy guard")

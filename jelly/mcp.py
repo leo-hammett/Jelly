@@ -1,4 +1,10 @@
-"""Thin utilities for installing and talking to MCP servers over stdio."""
+"""Thin utilities for installing and talking to MCP servers over stdio.
+
+Policy:
+- stdio transport is supported for Python-native MCP servers.
+- Node-family servers (npx/node/npm/etc.) are intentionally blocked on stdio in this
+  module due known reliability issues on macOS. Use an HTTP/SSE sidecar path instead.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +21,14 @@ from typing import Any
 from jelly.run_logging import RunLogger
 
 _next_id = 0
+_NODE_STDIO_COMMANDS = {
+    "node",
+    "npx",
+    "npm",
+    "pnpm",
+    "yarn",
+    "bun",
+}
 
 
 @dataclass
@@ -121,6 +135,7 @@ def start_server(
     Waits for the process to be ready, then sends the JSON-RPC
     `initialize` handshake before returning.
     """
+    _assert_stdio_server_allowed(server, logger)
     _preflight_server(server, logger)
     env = {**os.environ, **server.env}
     proc = subprocess.Popen(
@@ -140,8 +155,8 @@ def start_server(
         args=server.args,
     )
     try:
-        # Give wrappers a short bootstrap window and fail fast if process exits.
-        deadline = time.monotonic() + max(0.0, min(startup_wait, 0.5))
+        # Respect caller-provided startup_wait so slower Python servers can warm up.
+        deadline = time.monotonic() + max(0.0, startup_wait)
         while time.monotonic() < deadline:
             if proc.poll() is not None:
                 stderr_tail = _stderr_tail(proc)
@@ -409,6 +424,38 @@ def _normalize_install_cmd(install_cmd: str | list[str]) -> list[str]:
     return []
 
 
+def _assert_stdio_server_allowed(server: MCPServer, logger: RunLogger | None) -> None:
+    command_name = Path(server.command).name.lower()
+    args_text = " ".join(server.args).lower()
+    is_node_family = command_name in _NODE_STDIO_COMMANDS or any(
+        marker in args_text
+        for marker in (
+            "@modelcontextprotocol/",
+            "@playwright/mcp",
+            "server-filesystem",
+            "playwright-mcp",
+        )
+    )
+    if not is_node_family:
+        return
+
+    message = (
+        "Node-family MCP servers are blocked for stdio transport in jelly.mcp. "
+        "Use a Python-native MCP server over stdio, or launch Node servers as "
+        "HTTP/SSE sidecars and connect via a Python client. "
+        f"Received command: {server.command} {' '.join(server.args)}"
+    )
+    _log(
+        logger,
+        "ERROR",
+        "start_server.node_stdio_blocked",
+        server=server.name,
+        command=server.command,
+        args=server.args,
+    )
+    raise RuntimeError(message)
+
+
 def _preflight_server(server: MCPServer, logger: RunLogger | None) -> None:
     if server.name.lower() != "filesystem":
         return
@@ -430,6 +477,10 @@ def _filesystem_workspace(server: MCPServer) -> str | None:
     for idx, arg in enumerate(server.args):
         if "server-filesystem" in arg and idx + 1 < len(server.args):
             return server.args[idx + 1]
+    if server.name.lower() == "filesystem" and server.args:
+        candidate = server.args[-1]
+        if candidate and not candidate.startswith("-"):
+            return candidate
     return None
 
 

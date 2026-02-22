@@ -198,10 +198,18 @@ def _run_preflight_checks(requirements_path: str, project_dir: str) -> list[Pref
     )
     checks.append(
         PreflightCheck(
-            name="npx_available",
-            ok=shutil.which("npx") is not None,
+            name="node_available",
+            ok=shutil.which("node") is not None,
             severity="soft",
-            message="npx is available for MCP server bootstrap.",
+            message="node is available for MCP sidecar workflows.",
+        )
+    )
+    checks.append(
+        PreflightCheck(
+            name="npm_available",
+            ok=shutil.which("npm") is not None,
+            severity="soft",
+            message="npm is available to install MCP sidecar packages.",
         )
     )
     return checks
@@ -220,26 +228,32 @@ def _is_project_dir_writable(project_dir: str) -> bool:
 
 
 def _mcp_baseline_status() -> dict[str, dict[str, Any]]:
-    has_npx = shutil.which("npx") is not None
     has_node = shutil.which("node") is not None
-    filesystem_ok = has_npx and has_node
-    browser_ok = has_npx and has_node
+    has_npm = shutil.which("npm") is not None
+    filesystem_ok = has_node and has_npm
+    browser_ok = has_node and has_npm
     return {
         "filesystem": {
             "available": filesystem_ok,
-            "detail": "Requires `node` and `npx` to launch @modelcontextprotocol/server-filesystem.",
-            "required_commands": ["node", "npx"],
+            "detail": (
+                "Requires `node` and `npm`; Node-family MCP servers should run as "
+                "HTTP/SSE sidecars instead of stdio."
+            ),
+            "required_commands": ["node", "npm"],
         },
         "browser": {
             "available": browser_ok,
-            "detail": "Requires `node` and `npx` to launch @playwright/mcp for browser workflows.",
-            "required_commands": ["node", "npx"],
+            "detail": (
+                "Requires `node` and `npm`; browser MCP servers should run via "
+                "HTTP/SSE sidecar transport."
+            ),
+            "required_commands": ["node", "npm"],
         },
     }
 
 
 def _available_tools_snapshot() -> dict[str, bool]:
-    commands = ("python", "python3", "pytest", "node", "npx", "git")
+    commands = ("python", "python3", "pytest", "node", "npm", "git")
     return {name: shutil.which(name) is not None for name in commands}
 
 

@@ -391,23 +391,20 @@ class TestDesigner:
         )
         prompt = (
             f"## Testing needs\n\n{json.dumps(needs_beyond_unit, indent=2)}\n\n"
-            "## Well-known MCP servers (prefer these)\n\n"
-            "1. **playwright** - Browser automation, E2E testing, UI verification\n"
-            '   command: "npx", args: ["-y", "@playwright/mcp@latest"]\n'
-            "   install_cmd: null (npx downloads on the fly)\n\n"
-            "2. **filesystem** - Read/write/search files, verify output files\n"
-            f'   command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "{filesystem_workspace}"]\n'
-            "   install_cmd: null\n\n"
-            "You may also suggest other MCP servers you know about.\n"
-            "If none of the testing needs require an MCP server, return [].\n\n"
+            "## MCP transport policy for this pipeline\n\n"
+            "- This pipeline only supports Python-native MCP servers over stdio.\n"
+            "- Do NOT propose Node-family commands (`npx`, `node`, `npm`, `pnpm`, `yarn`, `bun`).\n"
+            "- Do NOT propose `@modelcontextprotocol/*` npm servers for stdio here.\n"
+            "- If suitable Python MCP servers are unavailable, return [].\n\n"
+            "You may suggest Python stdio servers when available.\n\n"
             "Respond with a JSON array in a code block:\n"
             "```json\n"
             "[\n"
             "  {\n"
             '    "name": "server_name",\n'
-            '    "command": "npx",\n'
-            '    "args": ["package@version"],\n'
-            '    "install_cmd": "npm install -g package" or null\n'
+            '    "command": "python",\n'
+            '    "args": ["path_or_module_for_python_server"],\n'
+            '    "install_cmd": "optional pip/uv install command" or null\n'
             "  }\n"
             "]\n"
             "```"
@@ -438,7 +435,7 @@ class TestDesigner:
         filesystem_workspace: str,
     ) -> MCPServer | None:
         name = str(entry.get("name", "")).strip()
-        command = str(entry.get("command", "npx")).strip()
+        command = str(entry.get("command", "python")).strip()
         if not name or not command:
             return None
 
@@ -450,16 +447,19 @@ class TestDesigner:
         else:
             args = []
 
-        if command == "npx" and "-y" not in args and "--yes" not in args:
-            args.insert(0, "-y")
+        if self._is_node_family_command(command, args):
+            self._log(
+                "WARNING",
+                "select_tools.rejected_node_stdio_server",
+                server=name,
+                command=command,
+                args=args,
+            )
+            return None
 
         if name.lower() == "filesystem":
-            flags = [a for a in args if a.startswith("-")]
-            package = next(
-                (a for a in args if "server-filesystem" in a),
-                "@modelcontextprotocol/server-filesystem",
-            )
-            args = [*flags, package, filesystem_workspace]
+            if filesystem_workspace not in args:
+                args.append(filesystem_workspace)
 
         install_cmd = entry.get("install_cmd")
         if install_cmd is not None and not isinstance(install_cmd, (str, list)):
@@ -470,6 +470,22 @@ class TestDesigner:
             command=command,
             args=args,
             install_cmd=install_cmd,
+        )
+
+    @staticmethod
+    def _is_node_family_command(command: str, args: list[str]) -> bool:
+        cmd = command.lower().strip()
+        if cmd in {"node", "npx", "npm", "pnpm", "yarn", "bun"}:
+            return True
+        args_text = " ".join(args).lower()
+        return any(
+            marker in args_text
+            for marker in (
+                "@modelcontextprotocol/",
+                "@playwright/mcp",
+                "server-filesystem",
+                "playwright-mcp",
+            )
         )
 
     def _install_tools(self, servers: list[MCPServer]) -> list[MCPServer]:

@@ -1,238 +1,388 @@
 """
 Comprehensive tests for list_utils module.
-Tests are written against the specification, not any implementation.
+Tests are written against the specification, not any specific implementation.
+
+Functions under test:
+  - has_close_elements(numbers: list[float], threshold: float) -> bool
+  - is_monotonic(arr: list[int]) -> bool
 """
 
 import pytest
 from list_utils import has_close_elements, is_monotonic
 
 
-# ===========================================================================
+# =============================================================================
 # FR-1: has_close_elements
-# ===========================================================================
+# =============================================================================
 
-class TestHasCloseElementsBasicFunctionality:
-    """Happy-path tests derived directly from the FR-1 specification."""
+class TestHasCloseElementsBasic:
+    """Basic functionality tests for has_close_elements (FR-1)."""
 
-    def test_no_close_pair_returns_false(self):
-        assert has_close_elements([1.0, 2.0, 3.0], 0.5) is False, \
-            "Elements spaced 1.0 apart with threshold 0.5 should return False"
+    def test_no_close_elements_evenly_spaced(self):
+        """Elements spaced wider than threshold should return False."""
+        result = has_close_elements([1.0, 2.0, 3.0], 0.5)
+        assert result is False, (
+            "Elements [1.0, 2.0, 3.0] are all 1.0 apart; "
+            "threshold 0.5 should yield False"
+        )
 
-    def test_close_pair_exists_returns_true(self):
-        assert has_close_elements([1.0, 2.8, 3.0, 4.0, 5.0, 2.0], 0.3) is True, \
-            "2.8 and 3.0 are 0.2 apart, which is less than threshold 0.3"
+    def test_close_elements_present(self):
+        """List with at least one pair closer than threshold should return True."""
+        result = has_close_elements([1.0, 2.8, 3.0, 4.0, 5.0, 2.0], 0.3)
+        assert result is True, (
+            "2.8 and 3.0 are 0.2 apart, which is less than threshold 0.3; "
+            "should return True"
+        )
 
-    def test_exactly_at_threshold_returns_false(self):
-        assert has_close_elements([1.0, 2.0, 3.0], 1.0) is False, \
-            "Pairs exactly AT the threshold distance are NOT closer than threshold"
+    def test_exactly_one_close_pair_among_many(self):
+        """Should detect a single close pair regardless of list length."""
+        result = has_close_elements([10.0, 20.0, 30.0, 30.05, 50.0], 0.1)
+        assert result is True, (
+            "30.0 and 30.05 are 0.05 apart (< 0.1 threshold); "
+            "should return True"
+        )
 
-    def test_just_below_threshold_returns_true(self):
-        assert has_close_elements([1.0, 1.9], 0.95) is True, \
-            "1.0 and 1.9 are 0.9 apart, which is less than 0.95 threshold"
+    def test_all_elements_far_apart(self):
+        """All pairs wider than threshold should return False."""
+        result = has_close_elements([0.0, 100.0, 200.0, 300.0], 50.0)
+        assert result is False, (
+            "All adjacent elements are 100.0 apart; "
+            "threshold 50.0 should yield False"
+        )
 
-    def test_non_adjacent_pair_detected(self):
-        assert has_close_elements([1.0, 5.0, 6.0, 10.0], 1.5) is True, \
-            "5.0 and 6.0 are close even though they are not first/last elements"
+    def test_negative_numbers_no_close_pair(self):
+        """Negative numbers spaced wider than threshold should return False."""
+        result = has_close_elements([-10.0, -5.0, 0.0, 5.0], 4.9)
+        assert result is False, (
+            "All pairs are 5.0 apart; threshold 4.9 should yield False"
+        )
+
+    def test_negative_numbers_with_close_pair(self):
+        """Negative numbers with a close pair should return True."""
+        result = has_close_elements([-3.0, -2.95, 0.0, 5.0], 0.1)
+        assert result is True, (
+            "-3.0 and -2.95 differ by 0.05 (< 0.1 threshold); "
+            "should return True"
+        )
+
+    def test_mixed_sign_numbers_close_across_zero(self):
+        """Numbers close across zero should be detected."""
+        result = has_close_elements([-0.1, 0.1], 0.3)
+        assert result is True, (
+            "-0.1 and 0.1 differ by 0.2 (< 0.3 threshold); "
+            "should return True"
+        )
 
 
 class TestHasCloseElementsEdgeCases:
-    """Edge-case tests for has_close_elements."""
+    """Edge case tests for has_close_elements (FR-1)."""
 
     def test_empty_list_returns_false(self):
-        assert has_close_elements([], 0.5) is False, \
-            "Empty list must return False per specification"
+        """Empty list must return False per spec."""
+        result = has_close_elements([], 1.0)
+        assert result is False, "Empty list should return False per FR-1 spec"
 
     def test_single_element_returns_false(self):
-        assert has_close_elements([42.0], 0.5) is False, \
-            "Single-element list must return False per specification"
+        """Single-element list must return False per spec (no pair exists)."""
+        result = has_close_elements([42.0], 0.5)
+        assert result is False, (
+            "Single-element list has no pair to compare; "
+            "should return False per FR-1 spec"
+        )
 
-    def test_two_identical_elements_threshold_above_zero_returns_true(self):
-        assert has_close_elements([1.0, 1.0], 0.5) is True, \
-            "Two identical elements have distance 0, which is less than any positive threshold"
+    def test_zero_threshold_no_duplicates(self):
+        """Zero threshold with distinct elements should return False."""
+        result = has_close_elements([1.0, 2.0, 3.0], 0.0)
+        assert result is False, (
+            "No two elements are strictly closer than 0; "
+            "should return False with zero threshold and distinct values"
+        )
 
-    def test_two_identical_elements_zero_threshold_returns_false(self):
-        assert has_close_elements([1.0, 1.0], 0.0) is False, \
-            "Distance 0 is NOT closer than threshold 0 (0 < 0 is False)"
+    def test_zero_threshold_with_duplicate_elements(self):
+        """Zero threshold with duplicate values — distance is 0, not < 0."""
+        # Per spec: closer THAN threshold (strict inequality implied by example)
+        # Two identical elements have distance 0; 0 < 0 is False
+        result = has_close_elements([1.0, 1.0, 2.0], 0.0)
+        assert result is False, (
+            "Identical elements have distance 0; "
+            "0 is not strictly less than threshold 0, should return False"
+        )
 
-    def test_zero_threshold_no_pair_returns_false(self):
-        assert has_close_elements([1.0, 2.0, 3.0], 0.0) is False, \
-            "With zero threshold, no pair is closer than 0 unless they are identical"
+    def test_duplicate_elements_above_zero_threshold(self):
+        """Identical elements with positive threshold should return True."""
+        result = has_close_elements([5.0, 5.0], 0.001)
+        assert result is True, (
+            "Two identical elements have distance 0 (< 0.001 threshold); "
+            "should return True"
+        )
 
-    def test_negative_numbers_close_pair(self):
-        assert has_close_elements([-1.0, -1.05, -5.0], 0.1) is True, \
-            "-1.0 and -1.05 are 0.05 apart, less than threshold 0.1"
+    def test_all_identical_elements(self):
+        """All-identical list with positive threshold should return True."""
+        result = has_close_elements([7.0, 7.0, 7.0, 7.0], 0.5)
+        assert result is True, (
+            "All elements are identical (distance 0 < 0.5 threshold); "
+            "should return True"
+        )
 
-    def test_negative_numbers_no_close_pair(self):
-        assert has_close_elements([-10.0, -5.0, -1.0], 1.0) is False, \
-            "All pairs are at least 4.0 apart, threshold is 1.0"
+    def test_two_elements_exactly_at_threshold(self):
+        """Two elements exactly at the threshold distance — boundary check."""
+        result = has_close_elements([1.0, 1.5], 0.5)
+        # distance == threshold → NOT closer than threshold (strict)
+        assert result is False, (
+            "Elements exactly at threshold distance (0.5) are not "
+            "CLOSER THAN threshold 0.5; should return False"
+        )
 
-    def test_mixed_positive_and_negative_close_pair(self):
-        assert has_close_elements([-0.1, 0.1], 0.3) is True, \
-            "-0.1 and 0.1 are 0.2 apart, which is less than 0.3 threshold"
+    def test_two_elements_just_below_threshold(self):
+        """Two elements just under the threshold should return True."""
+        result = has_close_elements([1.0, 1.4999], 0.5)
+        assert result is True, (
+            "Elements 0.4999 apart are closer than threshold 0.5; "
+            "should return True"
+        )
 
-    def test_all_identical_elements_returns_true(self):
-        assert has_close_elements([7.0, 7.0, 7.0, 7.0], 0.1) is True, \
-            "All identical elements have pairwise distance 0, less than any positive threshold"
+    def test_two_elements_just_above_threshold(self):
+        """Two elements just over the threshold should return False."""
+        result = has_close_elements([1.0, 1.5001], 0.5)
+        assert result is False, (
+            "Elements 0.5001 apart are not closer than threshold 0.5; "
+            "should return False"
+        )
 
-    def test_very_small_threshold(self):
-        assert has_close_elements([1.0, 1.000000001, 2.0], 1e-8) is True, \
-            "1.0 and 1.000000001 differ by 1e-9, which is less than threshold 1e-8"
+    def test_non_adjacent_pair_is_closest(self):
+        """Closest pair need not be adjacent in the list."""
+        result = has_close_elements([1.0, 10.0, 1.05, 20.0], 0.1)
+        assert result is True, (
+            "1.0 and 1.05 are 0.05 apart (< 0.1 threshold) and non-adjacent; "
+            "should still return True"
+        )
 
-    def test_very_large_threshold_returns_true(self):
-        assert has_close_elements([1.0, 1000000.0], 9999999.0) is True, \
-            "Gap of 999999 is less than threshold 9999999"
+    def test_very_large_threshold(self):
+        """Enormous threshold — any two-element list should match."""
+        result = has_close_elements([1.0, 1_000_000.0], 1_000_001.0)
+        assert result is True, (
+            "Distance 999_999 is less than threshold 1_000_001; "
+            "should return True"
+        )
 
-    def test_two_elements_not_close(self):
-        assert has_close_elements([0.0, 1.0], 0.5) is False, \
-            "Two elements exactly 1.0 apart with threshold 0.5 should return False"
+    def test_very_small_threshold_with_close_floats(self):
+        """Very small threshold should still detect sufficiently close values."""
+        result = has_close_elements([0.0, 1e-10], 1e-9)
+        assert result is True, (
+            "1e-10 distance is less than 1e-9 threshold; "
+            "should return True"
+        )
 
-    def test_unsorted_list_close_pair_detected(self):
-        assert has_close_elements([10.0, 1.0, 9.9, 20.0], 0.2) is True, \
-            "10.0 and 9.9 are 0.1 apart; function must not assume sorted input"
-
-    def test_floats_requiring_precision(self):
-        assert has_close_elements([0.1 + 0.2, 0.3], 1e-9) is True or \
-               has_close_elements([0.1 + 0.2, 0.3], 1e-9) is False, \
-            "Result must be a bool; floating-point representation is implementation detail"
+    def test_negative_threshold_behavior(self):
+        """No pair can be 'closer than' a negative threshold; expect False."""
+        result = has_close_elements([1.0, 2.0, 3.0], -1.0)
+        assert result is False, (
+            "No absolute distance is less than a negative threshold; "
+            "should return False"
+        )
 
 
 class TestHasCloseElementsLargeScale:
-    """Large-scale tests for has_close_elements."""
+    """Large-scale tests for has_close_elements (FR-1)."""
 
     def test_large_list_no_close_pair(self):
-        # Elements spaced exactly 1.0 apart; threshold is 0.5 → no pair qualifies
-        numbers = [float(i) for i in range(10_000)]
+        """10,000 integers cast to float — no pair is within 0.5."""
+        numbers = [float(i) for i in range(10_000)]  # gaps of exactly 1.0
         result = has_close_elements(numbers, 0.5)
-        assert result is False, \
-            "10,000 elements spaced 1.0 apart should have no pair closer than 0.5"
+        assert result is False, (
+            "10,000 elements spaced 1.0 apart; "
+            "threshold 0.5 should yield False"
+        )
 
-    def test_large_list_one_close_pair_at_end(self):
-        # All elements 1.0 apart except last two which are 0.1 apart
-        numbers = [float(i) for i in range(9_999)]
-        numbers.append(9997.1)  # close to 9997.0 which is at index 9997
+    def test_large_list_with_one_close_pair_at_end(self):
+        """10,000 elements with a single close pair hidden at the end."""
+        numbers = [float(i * 10) for i in range(9_999)]  # spaced 10 apart
+        numbers.append(numbers[-1] + 0.1)               # close pair at end
         result = has_close_elements(numbers, 0.5)
-        assert result is True, \
-            "One close pair (0.1 apart) hidden at the end of 10,000 elements should be detected"
+        assert result is True, (
+            "10,000-element list with exactly one close pair (0.1 apart) "
+            "at the end; threshold 0.5 should yield True"
+        )
 
-    def test_large_list_all_identical_returns_true(self):
+    def test_large_list_all_identical(self):
+        """10,000 identical elements should detect close (distance-0) pair."""
         numbers = [3.14] * 10_000
-        result = has_close_elements(numbers, 0.01)
-        assert result is True, \
-            "10,000 identical elements all have distance 0, less than any positive threshold"
+        result = has_close_elements(numbers, 0.001)
+        assert result is True, (
+            "10,000 identical elements all have distance 0 (< 0.001); "
+            "should return True"
+        )
 
 
-# ===========================================================================
+# =============================================================================
 # FR-2: is_monotonic
-# ===========================================================================
+# =============================================================================
 
-class TestIsMonotonicBasicFunctionality:
-    """Happy-path tests derived directly from the FR-2 specification."""
+class TestIsMonotonicBasic:
+    """Basic functionality tests for is_monotonic (FR-2)."""
 
-    def test_strictly_increasing_returns_true(self):
-        assert is_monotonic([1, 2, 3, 4, 5]) is True, \
-            "Strictly increasing sequence should be monotonic"
+    def test_strictly_increasing(self):
+        """Strictly increasing list should return True."""
+        result = is_monotonic([1, 2, 3, 4, 5])
+        assert result is True, "[1,2,3,4,5] is strictly increasing; should return True"
 
-    def test_strictly_decreasing_returns_true(self):
-        assert is_monotonic([5, 4, 3, 2, 1]) is True, \
-            "Strictly decreasing sequence should be monotonic"
+    def test_strictly_decreasing(self):
+        """Strictly decreasing list should return True."""
+        result = is_monotonic([5, 4, 3, 2, 1])
+        assert result is True, "[5,4,3,2,1] is strictly decreasing; should return True"
 
-    def test_non_monotonic_returns_false(self):
-        assert is_monotonic([1, 3, 2, 4]) is False, \
-            "Sequence that goes up then down is not monotonic"
+    def test_not_monotonic_mixed(self):
+        """List that goes up then down should return False."""
+        result = is_monotonic([1, 3, 2, 4])
+        assert result is False, "[1,3,2,4] is not monotonic; should return False"
 
-    def test_non_monotonic_decreasing_then_increasing(self):
-        assert is_monotonic([5, 3, 4, 1]) is False, \
-            "Sequence that goes down then up is not monotonic"
+    def test_not_monotonic_down_then_up(self):
+        """List that goes down then up should return False."""
+        result = is_monotonic([5, 3, 4, 1])
+        assert result is False, "[5,3,4,1] is not monotonic; should return False"
 
-    def test_equal_adjacent_elements_increasing_trend(self):
-        assert is_monotonic([1, 1, 2, 3]) is True, \
-            "Equal adjacent elements are allowed; overall trend is non-decreasing"
+    def test_increasing_with_negatives(self):
+        """Increasing list with negative values should return True."""
+        result = is_monotonic([-5, -3, -1, 0, 2, 4])
+        assert result is True, (
+            "[-5,-3,-1,0,2,4] is monotonically increasing; should return True"
+        )
+
+    def test_decreasing_with_negatives(self):
+        """Decreasing list through negative values should return True."""
+        result = is_monotonic([10, 5, 0, -5, -10])
+        assert result is True, (
+            "[10,5,0,-5,-10] is monotonically decreasing; should return True"
+        )
 
 
 class TestIsMonotonicEdgeCases:
-    """Edge-case tests for is_monotonic."""
+    """Edge case tests for is_monotonic (FR-2)."""
 
-    def test_empty_list_returns_true(self):
-        assert is_monotonic([]) is True, \
-            "Empty list is monotonic per specification"
+    def test_empty_list_is_monotonic(self):
+        """Empty list must return True per spec."""
+        result = is_monotonic([])
+        assert result is True, "Empty list should be considered monotonic per FR-2 spec"
 
-    def test_single_element_returns_true(self):
-        assert is_monotonic([42]) is True, \
-            "Single-element list is monotonic per specification"
+    def test_single_element_is_monotonic(self):
+        """Single-element list must return True per spec."""
+        result = is_monotonic([42])
+        assert result is True, (
+            "Single-element list should be considered monotonic per FR-2 spec"
+        )
 
-    def test_all_equal_elements_returns_true(self):
-        assert is_monotonic([7, 7, 7, 7]) is True, \
-            "All-equal list is both non-decreasing and non-increasing, so monotonic"
+    def test_all_identical_elements_is_monotonic(self):
+        """All-equal list is both non-decreasing and non-increasing — monotonic."""
+        result = is_monotonic([7, 7, 7, 7, 7])
+        assert result is True, (
+            "All-identical list [7,7,7,7,7] is monotonic (equal adjacent "
+            "elements are allowed per spec); should return True"
+        )
 
-    def test_two_elements_increasing_returns_true(self):
-        assert is_monotonic([1, 2]) is True, \
-            "Two elements in increasing order are monotonic"
+    def test_two_equal_elements_is_monotonic(self):
+        """Two identical elements should return True."""
+        result = is_monotonic([3, 3])
+        assert result is True, "[3,3] has equal adjacent elements; should return True"
 
-    def test_two_elements_decreasing_returns_true(self):
-        assert is_monotonic([2, 1]) is True, \
-            "Two elements in decreasing order are monotonic"
+    def test_increasing_with_equal_adjacent(self):
+        """Non-strictly increasing (plateau) should return True."""
+        result = is_monotonic([1, 2, 2, 3, 4])
+        assert result is True, (
+            "[1,2,2,3,4] is non-decreasing with a plateau; should return True"
+        )
 
-    def test_two_equal_elements_returns_true(self):
-        assert is_monotonic([5, 5]) is True, \
-            "Two equal elements satisfy both non-decreasing and non-increasing"
+    def test_decreasing_with_equal_adjacent(self):
+        """Non-strictly decreasing (plateau) should return True."""
+        result = is_monotonic([5, 4, 4, 3, 1])
+        assert result is True, (
+            "[5,4,4,3,1] is non-increasing with a plateau; should return True"
+        )
 
-    def test_negative_numbers_increasing(self):
-        assert is_monotonic([-5, -4, -3, -2, -1]) is True, \
-            "Increasing sequence of negatives is monotonic"
+    def test_two_elements_increasing(self):
+        """Two-element increasing list should return True."""
+        result = is_monotonic([1, 2])
+        assert result is True, "[1,2] is increasing; should return True"
 
-    def test_negative_numbers_decreasing(self):
-        assert is_monotonic([-1, -2, -3, -4]) is True, \
-            "Decreasing sequence of negatives is monotonic"
+    def test_two_elements_decreasing(self):
+        """Two-element decreasing list should return True."""
+        result = is_monotonic([2, 1])
+        assert result is True, "[2,1] is decreasing; should return True"
 
-    def test_mixed_sign_increasing(self):
-        assert is_monotonic([-3, -1, 0, 2, 5]) is True, \
-            "Increasing sequence crossing zero is monotonic"
+    def test_spike_at_end_breaks_monotonicity(self):
+        """Increasing list with a drop at the very end should return False."""
+        result = is_monotonic([1, 2, 3, 4, 3])
+        assert result is False, (
+            "[1,2,3,4,3] has a drop at the end; should return False"
+        )
 
-    def test_mixed_sign_non_monotonic(self):
-        assert is_monotonic([-3, 2, -1, 4]) is False, \
-            "Alternating positive and negative values are not monotonic"
+    def test_dip_at_start_breaks_monotonicity(self):
+        """Decreasing list with a rise at the very beginning should return False."""
+        result = is_monotonic([5, 6, 4, 3, 2])
+        assert result is False, (
+            "[5,6,4,3,2] rises then falls; should return False"
+        )
 
-    def test_plateau_then_decrease_is_monotonic(self):
-        assert is_monotonic([5, 5, 4, 3]) is True, \
-            "Non-increasing (plateau then decrease) is monotonic decreasing"
+    def test_large_negative_values(self):
+        """Monotonically decreasing list of large negatives."""
+        result = is_monotonic([-1, -100, -1000, -10000])
+        assert result is True, (
+            "[-1,-100,-1000,-10000] is monotonically decreasing; "
+            "should return True"
+        )
 
-    def test_plateau_then_increase_is_monotonic(self):
-        assert is_monotonic([1, 2, 2, 3]) is True, \
-            "Non-decreasing (increase then plateau) is monotonic increasing"
+    def test_single_violation_in_long_sequence(self):
+        """One out-of-order element in an otherwise increasing list."""
+        arr = list(range(1, 101))  # 1..100
+        arr[50] = 0                # inject a violation
+        result = is_monotonic(arr)
+        assert result is False, (
+            "One out-of-order element (0 at index 50) breaks monotonicity; "
+            "should return False"
+        )
 
-    def test_valley_shape_not_monotonic(self):
-        assert is_monotonic([5, 3, 3, 4]) is False, \
-            "Decrease then increase (valley) is not monotonic"
-
-    def test_peak_shape_not_monotonic(self):
-        assert is_monotonic([1, 3, 3, 2]) is False, \
-            "Increase then decrease (peak) is not monotonic"
-
-    def test_zeros_and_positives_increasing(self):
-        assert is_monotonic([0, 0, 1, 2]) is True, \
-            "Starting with zeros then increasing is non-decreasing monotonic"
-
-    def test_large_single_dip_not_monotonic(self):
-        arr = list(range(100)) + [50] + list(range(101, 200))
-        assert is_monotonic(arr) is False, \
-            "One dip in an otherwise increasing sequence breaks monotonicity"
+    def test_zero_in_sequence(self):
+        """Zero within an increasing sequence should not disrupt result."""
+        result = is_monotonic([-3, -2, -1, 0, 1, 2])
+        assert result is True, (
+            "[-3,-2,-1,0,1,2] crosses zero monotonically; should return True"
+        )
 
 
 class TestIsMonotonicLargeScale:
-    """Large-scale tests for is_monotonic."""
+    """Large-scale tests for is_monotonic (FR-2)."""
 
     def test_large_strictly_increasing_list(self):
+        """10,000 strictly increasing integers should return True."""
         arr = list(range(10_000))
-        assert is_monotonic(arr) is True, \
-            "10,000 strictly increasing integers should be monotonic"
+        result = is_monotonic(arr)
+        assert result is True, (
+            "10,000 strictly increasing integers should return True"
+        )
 
     def test_large_strictly_decreasing_list(self):
+        """10,000 strictly decreasing integers should return True."""
         arr = list(range(10_000, 0, -1))
-        assert is_monotonic(arr) is True, \
-            "10,000 strictly decreasing integers should be monotonic"
+        result = is_monotonic(arr)
+        assert result is True, (
+            "10,000 strictly decreasing integers should return True"
+        )
 
-    def test_large_list_with_single_violation(self):
+    def test_large_all_equal_list(self):
+        """10,000 identical integers should return True."""
+        arr = [42] * 10_000
+        result = is_monotonic(arr)
+        assert result is True, (
+            "10,000 identical elements are monotonic (equal adjacents allowed); "
+            "should return True"
+        )
+
+    def test_large_list_with_single_violation_at_midpoint(self):
+        """10,000 increasing integers with one violation at the midpoint."""
         arr = list(range(10_000))
-        arr[5_000] = arr[5_000] - 1  # introduce a single decrease in increasing sequence
-        assert is_monotonic(arr) is False, \
-            "A single out-of-order element in 10,000 should make the list non-monotonic"
+        arr[5_000] = arr[4_999]  # duplicate causes then-decrease
+        arr[5_001] = arr[4_999] - 1  # forces a decrease
+        result = is_monotonic(arr)
+        assert result is False, (
+            "10,000-element increasing list with a mid-point decrease "
+            "should return False"
+        )
