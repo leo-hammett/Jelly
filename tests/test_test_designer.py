@@ -1,5 +1,6 @@
 from jelly.agents.test_designer import TestDesigner as DesignerAgent
 from jelly.config import Config
+from jelly.mcp import MCPServer, MCPTestPlan
 
 
 def test_parse_response_normalizes_tests_prefix() -> None:
@@ -52,3 +53,138 @@ def test_normalize_server_entry_for_python_filesystem_server() -> None:
     assert server.command == "python"
     assert server.args[-1] == "/project/.mcp/filesystem"
     assert server.install_cmd is None
+
+
+def test_select_preinstalled_servers_requires_non_unit_needs() -> None:
+    servers = [MCPServer(name="filesystem", transport="http_sse", endpoint="http://x")]
+
+    selected = DesignerAgent._select_preinstalled_servers(
+        {"testing_needs": [{"category": "unit", "description": "unit tests"}]},
+        servers,
+    )
+    assert selected == []
+
+    selected = DesignerAgent._select_preinstalled_servers(
+        {"testing_needs": [{"category": "browser", "description": "user flow"}]},
+        servers,
+    )
+    assert [s.name for s in selected] == ["filesystem"]
+
+
+def test_design_tests_uses_bootstrap_registry_without_install(monkeypatch) -> None:
+    config = Config()
+    config.mcp_dynamic_sidecars_enabled = False
+    designer = DesignerAgent(config)
+
+    monkeypatch.setattr(
+        designer,
+        "_analyze_requirements",
+        lambda _requirements: {
+            "testing_needs": [{"category": "browser", "description": "ui flow"}]
+        },
+    )
+    monkeypatch.setattr(
+        designer,
+        "_install_tools",
+        lambda _servers: (_ for _ in ()).throw(
+            AssertionError("install_tools should not run with bootstrap registry")
+        ),
+    )
+    monkeypatch.setattr(
+        designer,
+        "_generate_test_plan",
+        lambda _requirements, _signatures, servers: (
+            {"test_a.py": "def test_a():\n    assert True\n"},
+            MCPTestPlan(servers=list(servers), steps=[], reason="no_valid_steps"),
+        ),
+    )
+
+    bootstrap_servers = [
+        MCPServer(name="filesystem", transport="http_sse", endpoint="http://fs"),
+        MCPServer(name="browser", transport="http_sse", endpoint="http://browser"),
+    ]
+    result = designer.design_tests(
+        requirements="# req",
+        function_signatures=["def x() -> int"],
+        project_dir=".",
+        preinstalled_servers=bootstrap_servers,
+    )
+
+    assert set(result.unit_test_files.keys()) == {"test_a.py"}
+    assert [s.name for s in result.installed_servers] == ["filesystem", "browser"]
+
+
+def test_normalize_dynamic_sidecar_entry_infers_install_and_filesystem_workspace() -> None:
+    config = Config()
+    config.mcp_dynamic_sidecars_enabled = True
+    designer = DesignerAgent(config)
+
+    server = designer._normalize_dynamic_sidecar_entry(
+        {
+            "name": "filesystem_dynamic",
+            "transport": "http_sse",
+            "package": "@modelcontextprotocol/server-filesystem",
+            "sidecar_cmd": ["npx", "-y", "@modelcontextprotocol/server-filesystem"],
+            "install_cmd": None,
+        },
+        "/project/.mcp/filesystem",
+    )
+
+    assert server is not None
+    assert server.dynamic_sidecar is True
+    assert server.transport == "http_sse"
+    assert server.sidecar_package == "@modelcontextprotocol/server-filesystem"
+    assert server.sidecar_command[-1] == "/project/.mcp/filesystem"
+    assert server.install_cmd == [
+        "npm",
+        "install",
+        "-g",
+        "@modelcontextprotocol/server-filesystem",
+    ]
+
+
+def test_design_tests_merges_dynamic_sidecars_with_bootstrap(monkeypatch) -> None:
+    config = Config()
+    config.mcp_dynamic_sidecars_enabled = True
+    designer = DesignerAgent(config)
+
+    monkeypatch.setattr(
+        designer,
+        "_analyze_requirements",
+        lambda _requirements: {
+            "testing_needs": [{"category": "browser", "description": "ui flow"}]
+        },
+    )
+    monkeypatch.setattr(
+        designer,
+        "_select_dynamic_sidecars",
+        lambda _analysis, _project_dir: [
+            MCPServer(
+                name="github",
+                transport="http_sse",
+                dynamic_sidecar=True,
+                sidecar_package="@modelcontextprotocol/server-github",
+                sidecar_command=["npx", "-y", "@modelcontextprotocol/server-github"],
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        designer,
+        "_generate_test_plan",
+        lambda _requirements, _signatures, servers: (
+            {"test_a.py": "def test_a():\n    assert True\n"},
+            MCPTestPlan(servers=list(servers), steps=[], reason="no_valid_steps"),
+        ),
+    )
+
+    bootstrap_servers = [
+        MCPServer(name="filesystem", transport="http_sse", endpoint="http://fs"),
+    ]
+    result = designer.design_tests(
+        requirements="# req",
+        function_signatures=["def x() -> int"],
+        project_dir=".",
+        preinstalled_servers=bootstrap_servers,
+    )
+
+    assert {s.name for s in result.installed_servers} == {"filesystem", "github"}

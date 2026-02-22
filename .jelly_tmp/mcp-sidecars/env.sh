@@ -1,0 +1,2 @@
+export JELLY_MCP_FILESYSTEM_URL="http://127.0.0.1:7611/mcp"
+export JELLY_MCP_BROWSER_URL="http://127.0.0.1:7612/mcp"

@@ -1,5 +1,6 @@
 import json
 import re
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -214,6 +215,7 @@ class TestDesigner:
         requirements: str,
         function_signatures: list[str],
         project_dir: str,
+        preinstalled_servers: list[MCPServer] | None = None,
     ) -> TestDesignResult:
         """Full pipeline: analyze reqs, pick tools, install them, generate tests.
 
@@ -228,8 +230,24 @@ class TestDesigner:
             project_dir=str(Path(project_dir).resolve()),
         )
         analysis = self._analyze_requirements(requirements)
-        servers = self._select_tools(analysis, project_dir)
-        installed = self._install_tools(servers)
+        dynamic_servers = self._select_dynamic_sidecars(analysis, project_dir)
+        if preinstalled_servers is None:
+            servers = self._select_tools(analysis, project_dir)
+            installed = self._merge_servers_by_name(
+                self._install_tools(servers),
+                dynamic_servers,
+            )
+        else:
+            installed = self._merge_servers_by_name(
+                self._select_preinstalled_servers(analysis, preinstalled_servers),
+                dynamic_servers,
+            )
+            self._log(
+                "INFO",
+                "select_tools.bootstrap_registry",
+                available_servers=[s.name for s in preinstalled_servers],
+                selected_servers=[s.name for s in installed],
+            )
         unit_tests, mcp_plan = self._generate_test_plan(
             requirements, function_signatures, installed
         )
@@ -237,7 +255,7 @@ class TestDesigner:
             "INFO",
             "design_tests.complete",
             unit_test_files=len(unit_tests),
-            selected_servers=len(servers),
+            selected_servers=len(installed),
             installed_servers=len(installed),
             mcp_steps=len(mcp_plan.steps),
         )
@@ -246,6 +264,174 @@ class TestDesigner:
             mcp_test_plan=mcp_plan,
             installed_servers=installed,
         )
+
+    @staticmethod
+    def _merge_servers_by_name(*server_lists: list[MCPServer]) -> list[MCPServer]:
+        merged: dict[str, MCPServer] = {}
+        for server_list in server_lists:
+            for server in server_list:
+                if server.name not in merged:
+                    merged[server.name] = server
+        return list(merged.values())
+
+    @staticmethod
+    def _select_preinstalled_servers(
+        analysis: dict,
+        preinstalled_servers: list[MCPServer],
+    ) -> list[MCPServer]:
+        testing_needs = analysis.get("testing_needs", [])
+        needs_beyond_unit = [
+            n for n in testing_needs if isinstance(n, dict) and n.get("category") != "unit"
+        ]
+        if not needs_beyond_unit:
+            return []
+        return list(preinstalled_servers)
+
+    def _select_dynamic_sidecars(
+        self,
+        analysis: dict,
+        project_dir: str,
+    ) -> list[MCPServer]:
+        """Ask LLM for optional extra sidecars to provision on demand."""
+        if not self.config.mcp_dynamic_sidecars_enabled:
+            return []
+        testing_needs = analysis.get("testing_needs", [])
+        needs_beyond_unit = [
+            n for n in testing_needs if isinstance(n, dict) and n.get("category") != "unit"
+        ]
+        if not needs_beyond_unit:
+            return []
+
+        workspace = str((Path(project_dir) / ".mcp" / "filesystem").resolve())
+        agent = BaseAgent(
+            "You propose MCP sidecars for dynamic runtime provisioning. "
+            "Respond ONLY with a JSON array inside a code block.",
+            self.config,
+        )
+        prompt = (
+            f"## Testing needs\n\n{json.dumps(needs_beyond_unit, indent=2)}\n\n"
+            "Suggest extra MCP sidecars that should be installed/launched on demand.\n"
+            "Return JSON array entries like:\n"
+            "```json\n"
+            "[\n"
+            "  {\n"
+            '    "name": "github",\n'
+            '    "transport": "http_sse",\n'
+            '    "package": "@modelcontextprotocol/server-github",\n'
+            '    "sidecar_cmd": ["npx", "-y", "@modelcontextprotocol/server-github"],\n'
+            '    "install_cmd": "npm install -g @modelcontextprotocol/server-github" or null,\n'
+            '    "sidecar_port": 0,\n'
+            '    "tool_hints": ["tool names likely used"]\n'
+            "  }\n"
+            "]\n"
+            "```\n"
+            "Rules:\n"
+            "- transport must be http_sse\n"
+            "- include package and sidecar_cmd\n"
+            "- for filesystem server, include workspace path argument:\n"
+            f'  "{workspace}"\n'
+        )
+        response = agent.call(prompt, 4096)
+        raw = self._parse_json_response(response)
+        if not isinstance(raw, list):
+            self._log("WARNING", "select_dynamic_sidecars.parse_failed")
+            return []
+
+        dynamic_servers: list[MCPServer] = []
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            normalized = self._normalize_dynamic_sidecar_entry(entry, workspace)
+            if normalized:
+                dynamic_servers.append(normalized)
+        self._log(
+            "INFO",
+            "select_dynamic_sidecars.complete",
+            selected_servers=[s.name for s in dynamic_servers],
+        )
+        return dynamic_servers
+
+    def _normalize_dynamic_sidecar_entry(
+        self,
+        entry: dict[str, Any],
+        filesystem_workspace: str,
+    ) -> MCPServer | None:
+        transport = str(entry.get("transport", "http_sse")).strip().lower()
+        if transport != "http_sse":
+            self._log(
+                "WARNING",
+                "select_dynamic_sidecars.invalid_transport",
+                transport=transport,
+            )
+            return None
+
+        raw_name = str(entry.get("name", "")).strip()
+        raw_package = str(entry.get("package", "")).strip()
+        if not raw_name:
+            raw_name = self._slug_name(raw_package)
+        if not raw_name:
+            return None
+
+        raw_sidecar_cmd = entry.get("sidecar_cmd", [])
+        if isinstance(raw_sidecar_cmd, list):
+            sidecar_cmd = [str(v) for v in raw_sidecar_cmd if str(v).strip()]
+        elif isinstance(raw_sidecar_cmd, str):
+            sidecar_cmd = shlex.split(raw_sidecar_cmd)
+        else:
+            sidecar_cmd = []
+        if not sidecar_cmd and raw_package:
+            sidecar_cmd = ["npx", "-y", raw_package]
+        if not sidecar_cmd:
+            self._log(
+                "WARNING",
+                "select_dynamic_sidecars.invalid_sidecar_cmd",
+                server=raw_name,
+            )
+            return None
+
+        cmd_text = " ".join(sidecar_cmd).lower()
+        if "server-filesystem" in cmd_text and filesystem_workspace not in sidecar_cmd:
+            sidecar_cmd.append(filesystem_workspace)
+
+        install_cmd = entry.get("install_cmd")
+        if install_cmd is not None and not isinstance(install_cmd, (str, list)):
+            install_cmd = None
+        if install_cmd is None and raw_package:
+            install_cmd = ["npm", "install", "-g", raw_package]
+
+        sidecar_port = entry.get("sidecar_port")
+        if isinstance(sidecar_port, int) and sidecar_port > 0:
+            port = sidecar_port
+        else:
+            port = None
+
+        tool_hints = entry.get("tool_hints", [])
+        if not isinstance(tool_hints, list):
+            tool_hints = []
+
+        return MCPServer(
+            name=raw_name,
+            transport="http_sse",
+            endpoint=None,
+            install_cmd=install_cmd,
+            dynamic_sidecar=True,
+            sidecar_package=raw_package or None,
+            sidecar_command=sidecar_cmd,
+            sidecar_port=port,
+            metadata={
+                "source": "dynamic_llm",
+                "tool_hints": [str(t) for t in tool_hints if str(t).strip()],
+            },
+        )
+
+    @staticmethod
+    def _slug_name(value: str) -> str:
+        if not value:
+            return ""
+        candidate = value.strip().split("/")[-1]
+        candidate = candidate.replace("@", "")
+        candidate = re.sub(r"[^a-zA-Z0-9_-]+", "_", candidate)
+        return candidate.strip("_")
 
     def adapt_tests(
         self,
@@ -517,7 +703,7 @@ class TestDesigner:
         unit_tests = self.generate_tests(requirements, function_signatures)
 
         if not servers:
-            return unit_tests, MCPTestPlan()
+            return unit_tests, MCPTestPlan(reason="no_available_servers")
 
         server_names = ", ".join(s.name for s in servers)
         agent = BaseAgent(
@@ -574,7 +760,8 @@ class TestDesigner:
                     available_servers=sorted(valid_names),
                 )
 
-        plan = MCPTestPlan(servers=servers, steps=filtered_steps)
+        reason = "" if filtered_steps else "no_valid_steps"
+        plan = MCPTestPlan(servers=servers, steps=filtered_steps, reason=reason)
         self._log(
             "INFO",
             "generate_test_plan.complete",

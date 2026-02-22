@@ -54,7 +54,7 @@ def assess_capability(
     logger: RunLogger | None = None,
 ) -> CapabilityDecision:
     checks = _run_preflight_checks(requirements_path, project_dir)
-    mcp_baseline = _mcp_baseline_status()
+    mcp_baseline = _mcp_baseline_status(config)
 
     if config.require_mcp_baseline:
         for key, status in mcp_baseline.items():
@@ -227,27 +227,59 @@ def _is_project_dir_writable(project_dir: str) -> bool:
         return False
 
 
-def _mcp_baseline_status() -> dict[str, dict[str, Any]]:
+def _mcp_baseline_status(config: Config) -> dict[str, dict[str, Any]]:
     has_node = shutil.which("node") is not None
     has_npm = shutil.which("npm") is not None
-    filesystem_ok = has_node and has_npm
-    browser_ok = has_node and has_npm
+    mode = config.mcp_transport_mode.strip().lower()
+    fs_endpoint = os.getenv(config.mcp_filesystem_endpoint_env, "").strip()
+    browser_endpoint = os.getenv(config.mcp_browser_endpoint_env, "").strip()
+
+    if mode == "python_stdio_only":
+        filesystem_ok = False
+        browser_ok = False
+        filesystem_detail = (
+            "No bundled Python filesystem MCP preset is configured for stdio mode."
+        )
+        browser_detail = (
+            "No bundled Python browser MCP preset is configured for stdio mode."
+        )
+        filesystem_required = ["python"]
+        browser_required = ["python"]
+    elif mode == "allow_node_stdio":
+        filesystem_ok = has_node and has_npm
+        browser_ok = has_node and has_npm
+        filesystem_detail = (
+            "Requires `node` and `npm`; Node-family MCP may run over stdio."
+        )
+        browser_detail = (
+            "Requires `node` and `npm`; Node-family MCP may run over stdio."
+        )
+        filesystem_required = ["node", "npm"]
+        browser_required = ["node", "npm"]
+    else:
+        filesystem_ok = has_node and has_npm and bool(fs_endpoint)
+        browser_ok = has_node and has_npm and bool(browser_endpoint)
+        filesystem_detail = (
+            "Requires `node` + `npm` and sidecar endpoint env "
+            f"`{config.mcp_filesystem_endpoint_env}`."
+        )
+        browser_detail = (
+            "Requires `node` + `npm` and sidecar endpoint env "
+            f"`{config.mcp_browser_endpoint_env}`."
+        )
+        filesystem_required = ["node", "npm", config.mcp_filesystem_endpoint_env]
+        browser_required = ["node", "npm", config.mcp_browser_endpoint_env]
+
     return {
         "filesystem": {
             "available": filesystem_ok,
-            "detail": (
-                "Requires `node` and `npm`; Node-family MCP servers should run as "
-                "HTTP/SSE sidecars instead of stdio."
-            ),
-            "required_commands": ["node", "npm"],
+            "detail": filesystem_detail,
+            "required_commands": filesystem_required,
         },
         "browser": {
             "available": browser_ok,
-            "detail": (
-                "Requires `node` and `npm`; browser MCP servers should run via "
-                "HTTP/SSE sidecar transport."
-            ),
-            "required_commands": ["node", "npm"],
+            "detail": browser_detail,
+            "required_commands": browser_required,
         },
     }
 

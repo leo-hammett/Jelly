@@ -1,11 +1,12 @@
 /* ── Global ─────────────────────────────────────────────────── */
 
 Screen {
-    background: $surface;
+    background: #100710;
+    color: #ffd1f0;
 }
 
 .pane-splitter {
-    background: $panel;
+    background: #3a1e39;
 }
 
 .pane-splitter-vertical {
@@ -21,7 +22,19 @@ Screen {
 }
 
 .pane-splitter.dragging {
-    background: $accent;
+    background: #ff72c8;
+}
+
+Button {
+    border: heavy #7e3f77;
+    background: #2a1228;
+    color: #ffd1f0;
+    text-style: bold;
+}
+
+Button:hover {
+    background: #4f1f4a;
+    color: #fff6ff;
 }
 
 /* ── Home Screen ───────────────────────────────────────────── */
@@ -34,7 +47,7 @@ Screen {
 #home-title {
     text-align: center;
     text-style: bold;
-    color: $accent;
+    color: #fff6ff;
     padding: 1 0;
     width: 100%;
 }
@@ -47,13 +60,14 @@ Screen {
 #file-panel {
     width: 1fr;
     height: 100%;
-    border: solid $primary;
+    border: heavy #ff72c8;
+    background: #150c16;
     padding: 1 2;
 }
 
 #file-panel-title {
     text-style: bold;
-    color: $text;
+    color: #ffd1f0;
     padding-bottom: 1;
 }
 
@@ -61,19 +75,21 @@ Screen {
     width: 40;
     min-width: 32;
     height: 100%;
-    border: solid $primary;
+    border: heavy #ff72c8;
+    background: #150c16;
     padding: 1 2;
 }
 
 #score-title {
     text-style: bold;
-    color: $text;
+    color: #ffd1f0;
     padding-bottom: 1;
 }
 
 #score-value {
     text-align: center;
     text-style: bold;
+    color: #fff6ff;
     padding: 1 0;
 }
 
@@ -83,9 +99,11 @@ Screen {
 
 #score-details {
     padding-top: 1;
+    color: #f8bfe7;
 }
 
 #suggestions-box {
+    color: #f8bfe7;
     padding-top: 1;
     height: auto;
     max-height: 12;
@@ -93,16 +111,18 @@ Screen {
 
 .action-bar {
     dock: bottom;
-    height: 3;
+    height: auto;
+    min-height: 3;
     padding: 0 2;
-    background: $panel;
+    background: #1e0f20;
+    border-top: heavy #7e3f77;
     layout: horizontal;
     align: center middle;
 }
 
 .action-bar Button {
     margin: 0 1;
-    min-width: 16;
+    min-width: 10;
 }
 
 /* ── Plan Screen ───────────────────────────────────────────── */
@@ -116,7 +136,8 @@ Screen {
     dock: top;
     height: 3;
     padding: 0 2;
-    background: $panel;
+    background: #1e0f20;
+    border-bottom: heavy #7e3f77;
     layout: horizontal;
     align: center middle;
 }
@@ -124,12 +145,13 @@ Screen {
 #plan-header-title {
     width: 1fr;
     text-style: bold;
-    color: $accent;
+    color: #fff6ff;
 }
 
 #plan-score-label {
     width: auto;
     text-style: bold;
+    color: #ffd1f0;
 }
 
 #plan-body {
@@ -139,39 +161,82 @@ Screen {
 
 #conversation-log {
     height: 1fr;
-    border: solid $primary;
+    border: heavy #ff72c8;
+    background: #150c16;
     padding: 1 2;
     overflow-y: auto;
 }
 
 .user-message {
-    color: $text;
+    color: #ffe2f5;
     padding: 0 0 1 0;
     margin: 0 0 0 2;
 }
 
 .assistant-message {
-    color: $accent;
+    color: #ff72c8;
     padding: 0 0 1 0;
 }
 
 .system-message {
-    color: $text-muted;
+    color: #f4c4e6;
     text-style: italic;
     padding: 0 0 1 0;
 }
 
 #plan-input-area {
-    height: 8;
-    min-height: 8;
+    height: auto;
+    min-height: 7;
     padding: 1 2;
-    background: $panel;
+    background: #1e0f20;
+    border-top: heavy #7e3f77;
+}
+
+#plan-suggest-row {
+    height: auto;
+    min-height: 2;
+    align: left middle;
+}
+
+#plan-suggest-row Button {
+    min-width: 24;
+    width: auto;
+    margin: 0 1 0 0;
+}
+
+#plan-input-row {
+    height: 3;
+    layout: horizontal;
+    align: center middle;
 }
 
 #plan-input {
-    height: auto;
+    width: 1fr;
+    height: 3;
     min-height: 3;
-    max-height: 5;
+    max-height: 3;
+    color: #fff6ff;
+    background: #120912;
+    border: heavy #7e3f77;
+}
+
+#btn-send {
+    width: 3;
+    min-width: 3;
+    margin: 0 0 0 1;
+    text-align: center;
+}
+
+#plan-action-row {
+    height: auto;
+    min-height: 2;
+    layout: horizontal;
+    align: left middle;
+}
+
+#plan-action-row Button {
+    min-width: 12;
+    margin: 0 1 0 0;
 }
 
 /* ── Execution Screen ──────────────────────────────────────── */
@@ -184,7 +249,7 @@ Screen {
 #exec-title {
     text-align: center;
     text-style: bold;
-    color: $accent;
+    color: #fff6ff;
     padding: 1 0;
 }
 
@@ -195,7 +260,8 @@ Screen {
 #steps-panel {
     height: 12;
     min-height: 6;
-    border: solid $primary;
+    border: heavy #ff72c8;
+    background: #150c16;
     padding: 1 2;
 }
 
@@ -216,7 +282,7 @@ Screen {
 
 .step-detail {
     width: 1fr;
-    color: $text-muted;
+    color: #f4c4e6;
     text-align: right;
 }
 
@@ -225,12 +291,14 @@ Screen {
 }
 
 #exec-log-title {
+    color: #ffd1f0;
     padding: 1 0 0 0;
 }
 
 #exec-log {
     height: 1fr;
-    border: solid $primary;
+    border: heavy #ff72c8;
+    background: #120812;
     padding: 1 2;
     overflow-y: auto;
 }
@@ -239,7 +307,8 @@ Screen {
     dock: bottom;
     height: 3;
     padding: 0 2;
-    background: $panel;
+    background: #1e0f20;
+    border-top: heavy #7e3f77;
     layout: horizontal;
     align: center middle;
 }
@@ -257,14 +326,15 @@ Screen {
 
 #req-title {
     text-style: bold;
-    color: $accent;
+    color: #fff6ff;
     padding: 1 0;
     text-align: center;
 }
 
 #req-markdown {
     height: 1fr;
-    border: solid $primary;
+    border: heavy #ff72c8;
+    background: #120812;
     padding: 1 2;
     overflow-y: auto;
 }
@@ -273,11 +343,81 @@ Screen {
     dock: bottom;
     height: 3;
     padding: 0 2;
-    background: $panel;
+    background: #1e0f20;
+    border-top: heavy #7e3f77;
     layout: horizontal;
     align: center middle;
 }
 
 #req-footer Button {
     margin: 0 1;
+}
+
+/* ── Plan Unsent Modal ─────────────────────────────────────── */
+
+#unsent-modal {
+    width: 70%;
+    max-width: 90;
+    border: heavy #ff72c8;
+    background: #150c16;
+    padding: 1 2;
+}
+
+#unsent-modal-title {
+    text-style: bold;
+    color: #fff6ff;
+    padding-bottom: 1;
+}
+
+#unsent-modal-text {
+    color: #ffd1f0;
+    padding-bottom: 1;
+}
+
+#unsent-modal-actions {
+    height: auto;
+    layout: horizontal;
+    align: left middle;
+}
+
+#unsent-modal-actions Button {
+    min-width: 16;
+    margin: 0 1 0 0;
+}
+
+/* ── Plan Preview Screen ───────────────────────────────────── */
+
+#plan-preview-container {
+    height: 1fr;
+    padding: 1 2;
+}
+
+#plan-preview-title {
+    text-style: bold;
+    color: #fff6ff;
+    text-align: center;
+    padding: 1 0;
+}
+
+#plan-preview-markdown {
+    height: 1fr;
+    border: heavy #ff72c8;
+    background: #120812;
+    padding: 1 2;
+    overflow-y: auto;
+}
+
+#plan-preview-footer {
+    dock: bottom;
+    height: 3;
+    padding: 0 2;
+    background: #1e0f20;
+    border-top: heavy #7e3f77;
+    layout: horizontal;
+    align: center middle;
+}
+
+#plan-preview-footer Button {
+    margin: 0 1;
+    min-width: 14;
 }

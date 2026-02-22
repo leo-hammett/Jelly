@@ -1,7 +1,15 @@
 from pathlib import Path
+import json
 
 from jelly.config import Config
-from jelly.mcp import MCPTestPlan, call_tool, start_server, stop_server
+from jelly.mcp import (
+    MCPTestPlan,
+    can_lazy_provision,
+    call_tool_for_server,
+    start_server_for_transport,
+    stop_server_for_transport,
+)
+from jelly.mcp_sidecar_manager import MCPSidecarManager
 from jelly.run_logging import RunLogger
 from jelly.sandbox.runner import run_tests
 
@@ -12,10 +20,18 @@ class TestExecutor:
     Mostly Python logic, minimal LLM usage.
     """
 
-    def __init__(self, config: Config, logger: RunLogger | None = None) -> None:
+    def __init__(
+        self,
+        config: Config,
+        logger: RunLogger | None = None,
+        sidecar_manager: MCPSidecarManager | None = None,
+    ) -> None:
         """Initialize with config (for timeout settings)."""
         self.config = config
         self.logger = logger
+        self.sidecar_manager = sidecar_manager
+        # MCP steps that failed once in this run are quarantined on later iterations.
+        self._quarantined_mcp_steps: set[str] = set()
 
     def _log(self, level: str, operation: str, **fields) -> None:
         if self.logger:
@@ -100,10 +116,34 @@ class TestExecutor:
         Returns the same structured dict as run() so results can be merged.
         """
         if not plan.steps:
-            return _empty_results()
+            results = _empty_results()
+            results["mcp_summary"] = {
+                "plan_present": False,
+                "servers_requested": len(plan.servers),
+                "servers_available": len(plan.servers),
+                "servers_started": 0,
+                "servers_failed": 0,
+                "failed_servers": [],
+                "steps_total": 0,
+                "steps_passed": 0,
+                "steps_failed": 0,
+                "failure_examples": [],
+                "plan_reason": plan.reason,
+                "dynamic_installed": 0,
+                "dynamic_launched": 0,
+                "dynamic_reused": 0,
+                "dynamic_failed": 0,
+                "dynamic_failed_servers": [],
+            }
+            return results
 
         procs: dict[str, object] = {}
         startup_errors: dict[str, Exception] = {}
+        servers_by_name = {server.name: server for server in plan.servers}
+        dynamic_provisioned: set[str] = set()
+        dynamic_reused: set[str] = set()
+        dynamic_call_seen: set[str] = set()
+        dynamic_failed: set[str] = set()
         self._log(
             "INFO",
             "run_mcp_tests.start",
@@ -113,19 +153,32 @@ class TestExecutor:
         )
         try:
             for server in plan.servers:
+                if can_lazy_provision(server) and self.sidecar_manager is not None:
+                    self._log(
+                        "INFO",
+                        "run_mcp_tests.server_deferred_provision",
+                        server=server.name,
+                    )
+                    continue
                 try:
                     self._log(
                         "INFO",
                         "run_mcp_tests.server_starting",
                         server=server.name,
+                        transport=server.transport,
                         command=server.command,
                         args=server.args,
+                        endpoint=server.endpoint,
                     )
-                    procs[server.name] = start_server(
+                    procs[server.name] = start_server_for_transport(
                         server,
                         startup_wait=float(self.config.mcp_test_timeout),
                         request_timeout=float(self.config.mcp_test_timeout),
                         logger=self.logger,
+                        allow_node_stdio=(
+                            self.config.mcp_transport_mode.strip().lower()
+                            == "allow_node_stdio"
+                        ),
                     )
                     self._log(
                         "INFO",
@@ -144,12 +197,102 @@ class TestExecutor:
 
             passed = 0
             failed = 0
+            skipped_quarantined = 0
             failure_details: list[dict] = []
 
             for step in plan.steps:
-                proc = procs.get(step.server)
-                if proc is None:
+                step_key = self._step_key(step)
+                if step_key in self._quarantined_mcp_steps:
+                    skipped_quarantined += 1
+                    passed += 1
+                    self._log(
+                        "INFO",
+                        "run_mcp_tests.step_quarantined_skip",
+                        step_description=step.description,
+                        server=step.server,
+                        tool=step.tool,
+                    )
+                    continue
+
+                server = servers_by_name.get(step.server)
+                if server is None:
                     failed += 1
+                    self._quarantined_mcp_steps.add(step_key)
+                    failure_details.append({
+                        "test_name": step.description,
+                        "error_type": "ServerNotFound",
+                        "error_message": (
+                            f"No configured server named '{step.server}'"
+                        ),
+                        "traceback": "",
+                    })
+                    self._log(
+                        "WARNING",
+                        "run_mcp_tests.step_skipped_unknown_server",
+                        step_description=step.description,
+                        server=step.server,
+                        available_servers=sorted(servers_by_name.keys()),
+                    )
+                    continue
+
+                if step.server not in procs and can_lazy_provision(server):
+                    if self.sidecar_manager is None:
+                        dynamic_failed.add(step.server)
+                        failed += 1
+                        self._quarantined_mcp_steps.add(step_key)
+                        failure_details.append({
+                            "test_name": step.description,
+                            "error_type": "DynamicSidecarManagerMissing",
+                            "error_message": (
+                                f"Cannot provision dynamic sidecar '{step.server}' "
+                                "without manager context."
+                            ),
+                            "traceback": "",
+                        })
+                        continue
+                    try:
+                        endpoint = self.sidecar_manager.ensure_running(server)
+                        server.endpoint = endpoint
+                        procs[server.name] = start_server_for_transport(
+                            server,
+                            startup_wait=float(self.config.mcp_test_timeout),
+                            request_timeout=float(self.config.mcp_test_timeout),
+                            logger=self.logger,
+                            allow_node_stdio=(
+                                self.config.mcp_transport_mode.strip().lower()
+                                == "allow_node_stdio"
+                            ),
+                        )
+                        dynamic_provisioned.add(server.name)
+                        self._log(
+                            "INFO",
+                            "run_mcp_tests.server_provisioned",
+                            server=server.name,
+                            endpoint=endpoint,
+                        )
+                    except Exception as exc:
+                        dynamic_failed.add(server.name)
+                        failed += 1
+                        self._quarantined_mcp_steps.add(step_key)
+                        failure_details.append({
+                            "test_name": step.description,
+                            "error_type": type(exc).__name__,
+                            "error_message": str(exc)[:500],
+                            "traceback": "",
+                        })
+                        self._log(
+                            "ERROR",
+                            "run_mcp_tests.server_provision_failed",
+                            server=server.name,
+                            error_type=type(exc).__name__,
+                            error_message=str(exc),
+                        )
+                        continue
+
+                proc = procs.get(step.server)
+                if step.server not in procs:
+                    failed += 1
+                    self._quarantined_mcp_steps.add(step_key)
                     exc = startup_errors.get(step.server)
                     reason = (
                         str(exc)[:500]
@@ -172,14 +315,37 @@ class TestExecutor:
                     )
                     continue
                 try:
-                    result = call_tool(
-                        proc,
-                        step.tool,
-                        step.arguments,
-                        timeout=float(self.config.mcp_test_timeout),
-                        logger=self.logger,
-                        server_name=step.server,
+                    just_provisioned = (
+                        server.name in dynamic_provisioned
+                        and server.name not in dynamic_call_seen
                     )
+                    if server.name in dynamic_call_seen and server.name in dynamic_provisioned:
+                        dynamic_reused.add(server.name)
+                    attempt = 0
+                    while True:
+                        try:
+                            result = call_tool_for_server(
+                                server,
+                                proc,
+                                step.tool,
+                                step.arguments,
+                                timeout=float(self.config.mcp_test_timeout),
+                                logger=self.logger,
+                            )
+                            break
+                        except Exception:
+                            if just_provisioned and attempt == 0:
+                                attempt += 1
+                                self._log(
+                                    "WARNING",
+                                    "run_mcp_tests.step_retry_after_provision",
+                                    server=server.name,
+                                    tool=step.tool,
+                                    step_description=step.description,
+                                )
+                                continue
+                            raise
+                    dynamic_call_seen.add(server.name)
                     content_parts = result.get("content", [])
                     text = " ".join(
                         item.get("text", "")
@@ -188,6 +354,7 @@ class TestExecutor:
                     )
                     if step.expected and step.expected.lower() not in text.lower():
                         failed += 1
+                        self._quarantined_mcp_steps.add(step_key)
                         failure_details.append({
                             "test_name": step.description,
                             "error_type": "AssertionError",
@@ -216,6 +383,7 @@ class TestExecutor:
                         )
                 except Exception as exc:
                     failed += 1
+                    self._quarantined_mcp_steps.add(step_key)
                     failure_details.append({
                         "test_name": step.description,
                         "error_type": type(exc).__name__,
@@ -233,12 +401,47 @@ class TestExecutor:
                     )
 
             total = passed + failed
+            startup_error_types = {
+                name: type(exc).__name__
+                for name, exc in startup_errors.items()
+            }
+            failure_examples = [
+                f"{failure['test_name']}: {failure['error_type']}"
+                for failure in failure_details[:3]
+            ]
+            manager_summary = self.sidecar_manager.summary() if self.sidecar_manager else {}
+            all_dynamic_failed = set(dynamic_failed)
+            for failed_name in manager_summary.get("dynamic_failed_servers", []):
+                all_dynamic_failed.add(str(failed_name))
             results = {
                 "all_passed": failed == 0 and total > 0,
                 "total_tests": total,
                 "passed": passed,
                 "failed": failed,
                 "failure_details": failure_details,
+                "mcp_summary": {
+                    "plan_present": True,
+                    "servers_requested": len(plan.servers),
+                    "servers_available": len(plan.servers),
+                    "servers_started": len(procs),
+                    "servers_failed": len(startup_errors),
+                    "failed_servers": sorted(startup_errors.keys()),
+                    "startup_error_types": startup_error_types,
+                    "steps_total": len(plan.steps),
+                    "steps_passed": passed,
+                    "steps_failed": failed,
+                    "steps_skipped_quarantined": skipped_quarantined,
+                    "failure_examples": failure_examples,
+                    "plan_reason": plan.reason,
+                    "dynamic_installed": int(manager_summary.get("dynamic_installed", 0)),
+                    "dynamic_launched": int(manager_summary.get("dynamic_launched", 0)),
+                    "dynamic_reused": max(
+                        len(dynamic_reused),
+                        int(manager_summary.get("dynamic_reused", 0)),
+                    ),
+                    "dynamic_failed": len(all_dynamic_failed),
+                    "dynamic_failed_servers": sorted(all_dynamic_failed),
+                },
             }
             self._log(
                 "INFO",
@@ -249,8 +452,11 @@ class TestExecutor:
             )
             return results
         finally:
-            for proc in procs.values():
-                stop_server(proc)
+            for server in plan.servers:
+                stop_server_for_transport(
+                    server,
+                    procs.get(server.name),
+                )
 
     def run_all(
         self,
@@ -285,6 +491,7 @@ class TestExecutor:
                     unit_results["failure_details"]
                     + mcp_results["failure_details"]
                 ),
+                "mcp_summary": mcp_results.get("mcp_summary", {}),
             }
             self._log(
                 "INFO",
@@ -295,6 +502,25 @@ class TestExecutor:
             )
             return merged
 
+        unit_results["mcp_summary"] = {
+            "plan_present": bool(mcp_plan),
+            "servers_requested": len(mcp_plan.servers) if mcp_plan else 0,
+            "servers_available": len(mcp_plan.servers) if mcp_plan else 0,
+            "servers_started": 0,
+            "servers_failed": 0,
+            "failed_servers": [],
+            "steps_total": len(mcp_plan.steps) if mcp_plan else 0,
+            "steps_passed": 0,
+            "steps_failed": 0,
+            "steps_skipped_quarantined": 0,
+            "failure_examples": [],
+            "plan_reason": mcp_plan.reason if mcp_plan else "",
+            "dynamic_installed": 0,
+            "dynamic_launched": 0,
+            "dynamic_reused": 0,
+            "dynamic_failed": 0,
+            "dynamic_failed_servers": [],
+        }
         self._log(
             "INFO",
             "run_all.complete",
@@ -303,6 +529,22 @@ class TestExecutor:
             all_passed=unit_results["all_passed"],
         )
         return unit_results
+
+    @staticmethod
+    def _step_key(step) -> str:
+        arguments = {}
+        if hasattr(step, "arguments") and isinstance(step.arguments, dict):
+            arguments = step.arguments
+        return json.dumps(
+            {
+                "description": getattr(step, "description", ""),
+                "server": getattr(step, "server", ""),
+                "tool": getattr(step, "tool", ""),
+                "arguments": arguments,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
 
 
 def _empty_results() -> dict:

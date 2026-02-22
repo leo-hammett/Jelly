@@ -1,6 +1,8 @@
 import io
 
 import jelly.mcp as mcp
+import jelly.mcp_sidecar_manager as sidecar_manager
+from jelly.config import Config
 
 
 def test_install_server_uses_non_shell_command(monkeypatch) -> None:
@@ -76,3 +78,142 @@ def test_start_server_blocks_node_family_stdio() -> None:
         assert "blocked for stdio transport" in str(exc)
     else:
         raise AssertionError("Expected RuntimeError from node stdio policy guard")
+
+
+def test_build_bootstrap_servers_reads_sidecar_endpoints(monkeypatch, tmp_path) -> None:
+    config = Config()
+    monkeypatch.setenv(config.mcp_filesystem_endpoint_env, "http://fs.example/mcp")
+    monkeypatch.setenv(config.mcp_browser_endpoint_env, "http://browser.example/mcp")
+
+    servers = mcp.build_bootstrap_servers(config, str(tmp_path))
+    assert [s.name for s in servers] == ["filesystem", "browser"]
+    assert all(s.transport == "http_sse" for s in servers)
+    assert servers[0].endpoint == "http://fs.example/mcp"
+    assert servers[1].endpoint == "http://browser.example/mcp"
+
+
+def test_bootstrap_servers_marks_missing_endpoints_unavailable(monkeypatch, tmp_path) -> None:
+    config = Config()
+    monkeypatch.delenv(config.mcp_filesystem_endpoint_env, raising=False)
+    monkeypatch.delenv(config.mcp_browser_endpoint_env, raising=False)
+
+    result = mcp.bootstrap_servers(config, str(tmp_path))
+    assert result.requested_servers == ["filesystem", "browser"]
+    assert result.available_servers == []
+    assert "filesystem" in result.unavailable
+    assert "browser" in result.unavailable
+
+
+def test_call_tool_for_server_http_transport(monkeypatch) -> None:
+    captured = {}
+
+    def fake_send(endpoint, method, params, **_kwargs):
+        captured["endpoint"] = endpoint
+        captured["method"] = method
+        captured["params"] = params
+        return {"result": {"content": [{"type": "text", "text": "ok"}]}}
+
+    monkeypatch.setattr(mcp, "_send_jsonrpc_http", fake_send)
+    server = mcp.MCPServer(
+        name="browser",
+        transport="http_sse",
+        endpoint="http://localhost:18080/mcp",
+    )
+    result = mcp.call_tool_for_server(server, None, "snapshot", {"interactive": True})
+
+    assert captured["endpoint"] == "http://localhost:18080/mcp"
+    assert captured["method"] == "tools/call"
+    assert captured["params"]["name"] == "snapshot"
+    assert result["content"][0]["text"] == "ok"
+
+
+def test_can_lazy_provision_for_dynamic_http_server() -> None:
+    server = mcp.MCPServer(
+        name="github",
+        transport="http_sse",
+        endpoint=None,
+        dynamic_sidecar=True,
+        sidecar_package="@modelcontextprotocol/server-github",
+        sidecar_command=["npx", "-y", "@modelcontextprotocol/server-github"],
+    )
+    assert mcp.can_lazy_provision(server) is True
+
+
+def test_sidecar_command_and_install_defaults_from_package() -> None:
+    server = mcp.MCPServer(
+        name="github",
+        transport="http_sse",
+        dynamic_sidecar=True,
+        sidecar_package="@modelcontextprotocol/server-github",
+    )
+    assert mcp.sidecar_launch_command(server) == [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-github",
+    ]
+    assert mcp.sidecar_install_command(server) == [
+        "npm",
+        "install",
+        "-g",
+        "@modelcontextprotocol/server-github",
+    ]
+
+
+def test_sidecar_manager_launches_and_reuses(monkeypatch, tmp_path) -> None:
+    config = Config()
+    config.mcp_dynamic_sidecars_enabled = True
+    config.mcp_dynamic_sidecar_base_port = 8810
+    config.mcp_dynamic_sidecar_port_span = 5
+    launches = []
+
+    class _FakeProc:
+        def __init__(self) -> None:
+            self._returncode = None
+
+        def poll(self):
+            return self._returncode
+
+        def terminate(self):
+            self._returncode = 0
+
+        def wait(self, timeout=None):  # noqa: ARG002
+            return 0
+
+        def kill(self):
+            self._returncode = -9
+
+    class _Resp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001, ARG002
+            return False
+
+    def fake_popen(cmd, **_kwargs):
+        launches.append(cmd)
+        return _FakeProc()
+
+    monkeypatch.setattr(sidecar_manager, "install_server", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(sidecar_manager.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(sidecar_manager, "_port_is_free", lambda _host, _port: True)
+    monkeypatch.setattr(sidecar_manager, "urlopen", lambda *_args, **_kwargs: _Resp())
+
+    manager = sidecar_manager.MCPSidecarManager(config, str(tmp_path))
+    server = mcp.MCPServer(
+        name="github",
+        transport="http_sse",
+        dynamic_sidecar=True,
+        sidecar_package="@modelcontextprotocol/server-github",
+        sidecar_command=["npx", "-y", "@modelcontextprotocol/server-github"],
+    )
+    endpoint1 = manager.ensure_running(server)
+    endpoint2 = manager.ensure_running(server)
+
+    assert endpoint1 == endpoint2
+    assert len(launches) == 1
+    summary = manager.summary()
+    assert summary["dynamic_launched"] == 1
+    assert summary["dynamic_reused"] == 1
+    manager.stop_all()

@@ -9,6 +9,7 @@ from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Label, ListItem, ListView, ProgressBar, Static
 
 from jelly.tui.splitter import PaneSplitter
+from jelly.tui.widgets import AnimatedLoading, ShimmerLabel
 
 
 class HomeScreen(Screen):
@@ -30,7 +31,7 @@ class HomeScreen(Screen):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Vertical(id="home-container"):
-            yield Static("[b]JELLY[/b] -- Multi-Agent Coding System", id="home-title")
+            yield ShimmerLabel("JELLY -- Multi-Agent Coding System", id="home-title", fps=7.0)
             with Horizontal(id="home-body"):
                 with Vertical(id="file-panel"):
                     yield Static("Requirements Files", id="file-panel-title")
@@ -45,7 +46,14 @@ class HomeScreen(Screen):
                 )
                 with Vertical(id="score-panel"):
                     yield Static("Readiness Score", id="score-title")
-                    yield Static("--", id="score-value")
+                    yield AnimatedLoading(
+                        "--",
+                        id="score-value",
+                        auto_start=False,
+                        fps=8.0,
+                        shimmer=False,
+                        show_spinner=True,
+                    )
                     yield ProgressBar(total=100, show_eta=False, id="score-bar")
                     yield Static("", id="score-details")
                     yield Static("", id="suggestions-box")
@@ -62,10 +70,11 @@ class HomeScreen(Screen):
     def _scan_files(self) -> None:
         cwd = Path.cwd()
         self._md_files = sorted(
-            (p for p in cwd.glob("*.md")
+            (p.resolve() for p in cwd.glob("*.md")
              if p.name.lower() not in {"readme.md", "changelog.md", "license.md"}),
             key=lambda p: (0 if "requirement" in p.name.lower() else 1, p.name),
         )
+        self._selected_path = None
 
         list_view = self.query_one("#file-list", ListView)
         list_view.clear()
@@ -76,6 +85,30 @@ class HomeScreen(Screen):
 
         for path in self._md_files:
             list_view.append(ListItem(Label(path.name), name=str(path)))
+
+        # Keep behavior deterministic: first row becomes active selection on load.
+        if self._md_files:
+            try:
+                list_view.index = 0
+            except Exception:
+                pass
+            self._selected_path = self._md_files[0]
+            self._score_selected()
+
+    def _current_selection(self) -> Path | None:
+        if not self._md_files:
+            return None
+        try:
+            list_view = self.query_one("#file-list", ListView)
+            idx = list_view.index
+        except Exception:
+            idx = None
+
+        if idx is not None and 0 <= idx < len(self._md_files):
+            return self._md_files[idx]
+        if self._selected_path in self._md_files:
+            return self._selected_path
+        return None
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         if not self._md_files:
@@ -95,19 +128,22 @@ class HomeScreen(Screen):
 
     @work(thread=True, exclusive=True, group="score")
     def _score_selected(self) -> None:
-        if self._selected_path is None:
+        selected = self._current_selection()
+        if selected is None:
             return
+        self._selected_path = selected
 
+        score_value = self.query_one("#score-value", AnimatedLoading)
         self.app.call_from_thread(
-            self.query_one("#score-value", Static).update,
-            "[dim]Scoring...[/dim]",
+            score_value.start,
+            "Scoring requirements...",
         )
 
         from jelly.agents.judge import Judge
         from jelly.config import Config
 
         judge = Judge(Config())
-        text = self._selected_path.read_text()
+        text = selected.read_text()
         result = judge.score(text)
         self._score_data = result
 
@@ -120,7 +156,7 @@ class HomeScreen(Screen):
             color = "red"
 
         self.app.call_from_thread(
-            self.query_one("#score-value", Static).update,
+            score_value.stop,
             f"[bold {color}]{score}[/bold {color}] / 100",
         )
         bar = self.query_one("#score-bar", ProgressBar)
@@ -163,24 +199,30 @@ class HomeScreen(Screen):
     def action_plan(self) -> None:
         from jelly.tui.screens.plan import PlanScreen
 
-        existing = str(self._selected_path) if self._selected_path else None
+        selected = self._current_selection()
+        self._selected_path = selected
+        existing = str(selected) if selected else None
         self.app.push_screen(PlanScreen(existing_requirements_path=existing))
 
     def action_execute(self) -> None:
-        if self._selected_path is None:
+        selected = self._current_selection()
+        if selected is None:
             self.notify("Select a requirements file first", severity="warning")
             return
+        self._selected_path = selected
         from jelly.tui.screens.execute import ExecuteScreen
 
-        self.app.push_screen(ExecuteScreen(str(self._selected_path)))
+        self.app.push_screen(ExecuteScreen(str(selected)))
 
     def action_view_requirements(self) -> None:
-        if self._selected_path is None:
+        selected = self._current_selection()
+        if selected is None:
             self.notify("Select a requirements file first", severity="warning")
             return
+        self._selected_path = selected
         from jelly.tui.screens.requirements import RequirementsScreen
 
-        self.app.push_screen(RequirementsScreen(str(self._selected_path)))
+        self.app.push_screen(RequirementsScreen(str(selected)))
 
     def action_quit(self) -> None:
         self.app.exit()
